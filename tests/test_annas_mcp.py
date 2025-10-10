@@ -1,0 +1,1 @@
+# TODO: Scrape and study MCP test guidelines here: https://gofastmcp.com/development/tests, define and run a test suite with clear intent, smoke testing each tool. Do not unnecessarily repeat tests already in annas test suite (corss references all `test_annas_*.py` files).

@@ -30,14 +30,14 @@ def workdir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_fetch_real_download_when_secret_key_present(workdir: Path) -> None:
+def test_download_artifact_real_download_when_secret_key_present(workdir: Path) -> None:
     secret = os.environ.get("ANNAS_SECRET_KEY")
     if not secret:
         pytest.skip("ANNAS_SECRET_KEY not configured; skipping live download test")
 
     annas = Annas(work_path=workdir, secret_key=secret)
     preferred_formats = {"epub", "mobi", "azw", "azw3", "txt", "html"}
-    results = annas.search("plato", limit=60)
+    results = annas.search_catalog("plato", limit=60)
     assert results, "Expected non-empty search results"
     candidate = next(
         (
@@ -51,11 +51,11 @@ def test_fetch_real_download_when_secret_key_present(workdir: Path) -> None:
     if candidate is None:
         pytest.skip("No supported search results available for download verification")
     md5 = candidate.md5
-    download_path = annas.fetch(md5)
+    download_path = annas.download_artifact(md5)
     assert download_path.exists()
 
 
-def test_search_text_reads_markdown_context(workdir: Path) -> None:
+def test_search_downloaded_text_reads_markdown_context(workdir: Path) -> None:
     annas = Annas(work_path=workdir)
     md5 = "a" * 32
     markdown_dir = workdir / md5
@@ -63,7 +63,7 @@ def test_search_text_reads_markdown_context(workdir: Path) -> None:
     markdown_path = markdown_dir / "sample.md"
     markdown_path.write_text("line1\nmatch here\nline3\nline4\n", encoding="utf-8")
 
-    snippet = annas.search_text(md5, "match", before=1, after=1, limit=1)
+    snippet = annas.search_downloaded_text(md5, "match", before=1, after=1, limit=1)
     assert "line1" in snippet
     assert "line3" in snippet
 
@@ -137,5 +137,5 @@ def test_chromadb_ingest_and_query(workdir: Path) -> None:
     assert metadatas is not None
     metadata = metadatas[0]
     assert metadata["md5"] == md5
-    results = annas.query_text(collection, "Intro", 1)
+    results = annas.query_collection(collection, "Intro", 1)
     assert results and "Intro" in results[0]

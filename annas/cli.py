@@ -152,8 +152,8 @@ class Annas:
 
     # ────────────────────────────────── Public API ──────────────────────────────────
 
-    def search(self, query: str, limit: int = 200) -> List[SearchResult]:
-        """Search Anna's Archive cards and return structured result models.
+    def search_catalog(self, query: str, limit: int = 200) -> List[SearchResult]:
+        """Search the live Anna's Archive catalog and return structured results.
 
         The query is stripped and validated before iterating through up to twenty
         result pages (Anna's Archive paginates search responses). Each unique md5
@@ -170,7 +170,9 @@ class Annas:
         results = scrape_search_results(normalized, limit=capped_limit)
         return results
 
-    def fetch(self, md5: str, collection: Optional[str] = None) -> Path:
+    def download_artifact(
+        self, md5: str, collection: Optional[str] = None
+    ) -> Path:
         """Download a file by md5, normalize artifacts, and optionally ingest chunks.
 
         The method validates the md5, invokes the fast download endpoint with the
@@ -221,7 +223,7 @@ class Annas:
         logger.info("Download complete", md5=md5, path=str(download_path))
         return download_path
 
-    def search_text(
+    def search_downloaded_text(
         self, md5: str, needle: str, before: int = 2, after: int = 2, limit: int = 3
     ) -> str:
         """Return markdown snippets around a needle for an existing md5 artifact.
@@ -264,7 +266,7 @@ class Annas:
 
         return "\n\n".join(snippets)
 
-    def query_text(
+    def query_collection(
         self, collection: str, query: str, n: int, md5s: Optional[str] = None
     ) -> List[str]:
         """Query a Chroma collection and format the best-matching document chunks.

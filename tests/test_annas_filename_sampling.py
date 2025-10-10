@@ -37,7 +37,7 @@ def test_search_result_invariants(tmp_path: Path) -> None:
     annas = Annas(work_path=workdir)
 
     try:
-        sample = annas.search("plato", limit=100)
+        sample = annas.search_catalog("plato", limit=100)
     except Exception as exc:  # pragma: no cover - network flake protection
         pytest.skip(f"Search unavailable: {exc!r}")
 

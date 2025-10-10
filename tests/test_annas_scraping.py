@@ -136,7 +136,7 @@ def test_scraped_metadata_matches_download(tmp_path: Path) -> None:
         pytest.skip("No suitable search result with metadata available for download comparison")
 
     annas = Annas(work_path=tmp_path / "annas", secret_key=secret)
-    download_path = annas.fetch(candidate.md5)
+    download_path = annas.download_artifact(candidate.md5)
     assert download_path.exists(), "Expected downloaded artifact to exist"
 
     actual_size = download_path.stat().st_size
