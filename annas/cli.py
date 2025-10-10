@@ -104,17 +104,11 @@ class DocumentMetadata(BaseModel):
 class Annas:
     def __init__(
         self,
-        work_path: Optional[Path | str] = None,
+        work_path: Path | str = os.environ.get("ANNAS_DOWNLOAD_PATH", ""),
         secret_key: Optional[str] = None,
-        log_level: str = "INFO",
     ) -> None:
-        resolved_work = work_path or os.environ.get("ANNAS_DOWNLOAD_PATH")
-        assert resolved_work, "ANNAS_DOWNLOAD_PATH must be provided"
 
-        logger.remove()
-        logger.add(sys.stderr, level=log_level.upper(), serialize=False)
-
-        self.work_path = Path(resolved_work).expanduser()
+        self.work_path = Path(work_path).resolve()
         self.work_path.mkdir(parents=True, exist_ok=True)
 
         env_secret = secret_key or os.environ.get("ANNAS_SECRET_KEY")
@@ -170,9 +164,7 @@ class Annas:
         results = scrape_search_results(normalized, limit=capped_limit)
         return results
 
-    def download_artifact(
-        self, md5: str, collection: Optional[str] = None
-    ) -> Path:
+    def download_artifact(self, md5: str, collection: Optional[str] = None) -> Path:
         """Download a file by md5, normalize artifacts, and optionally ingest chunks.
 
         The method validates the md5, invokes the fast download endpoint with the
