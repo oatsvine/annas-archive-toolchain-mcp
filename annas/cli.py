@@ -14,8 +14,8 @@ import shutil
 import sys
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Sequence, Set, Tuple
-from urllib.parse import unquote, urljoin, urlsplit, urlencode
+from typing import Any, Dict, List, Optional, Protocol, Sequence, cast
+from urllib.parse import unquote, urlsplit
 
 import backoff
 import certifi
@@ -25,21 +25,14 @@ import mobi
 import requests
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
-from chromadb.api.types import QueryResult, Where
+from chromadb.api.types import Metadata, QueryResult, Where
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
-from playwright.sync_api import (
-    Locator,
-    Page,
-    TimeoutError as PlaywrightTimeoutError,
-    sync_playwright,
-)
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from annas.scrape import ANNAS_BASE_URL, SearchResult, scrape_search_results
 from unstructured.documents.elements import ElementMetadata
 from unstructured.partition.auto import partition
 
-ANNAS_BASE_URL = "https://annas-archive.org"
-SEARCH_ENDPOINT = f"{ANNAS_BASE_URL}/search"
 FAST_DOWNLOAD_ENDPOINT = f"{ANNAS_BASE_URL}/dyn/api/fast_download.json"
 MD5_PATTERN = re.compile(r"[0-9a-f]{32}", re.IGNORECASE)
 ANNA_BRAND_PATTERN = re.compile(r"anna[’']?s archive", re.IGNORECASE)
@@ -53,43 +46,59 @@ class ElementLike(Protocol):
     metadata: ElementMetadata
 
 
-class SearchResult(BaseModel):
-    """Structured representation of a single Anna's Archive search card."""
+class DocumentMetadata(BaseModel):
+    """Structured metadata extracted from sanitized filenames."""
 
     model_config = ConfigDict(extra="forbid")
 
-    md5: str = Field(pattern=r"^[0-9a-f]{32}$")
-    title: str = Field(min_length=1)
-    url: str = Field(min_length=1)
-    is_verified: Optional[bool] = None
-    language: Optional[str] = None
-    language_code: Optional[str] = None
-    file_format: Optional[str] = None
-    file_size_bytes: Optional[int] = Field(default=None, ge=1)
-    file_size_label: Optional[str] = None
-    year: Optional[int] = Field(default=None, ge=0)
-    category: Optional[str] = None
-    source: Optional[str] = None
-    source_path: Optional[str] = None
-    description: Optional[str] = None
-    cover_url: Optional[str] = None
-    download_count: Optional[int] = Field(default=None, ge=0)
+    author: Optional[str] = Field(default=None, description="Primary author name")
+    title: str = Field(min_length=1, description="Normalized title")
+    extras: List[str] = Field(
+        default_factory=list, description="Additional metadata segments"
+    )
+    format: str = Field(min_length=1, description="Lowercase file extension")
+    size_bytes: Optional[int] = Field(
+        default=None, ge=0, description="File size in bytes when available"
+    )
 
-    @field_validator("md5")
-    @staticmethod
-    def _lowercase_md5(value: str) -> str:
-        return value.lower()
-
-    @field_validator("url")
+    @field_validator("author", mode="before")
     @classmethod
-    def _normalize_url(cls, value: str, info: ValidationInfo) -> str:
-        normalized = value.strip()
-        if not normalized.startswith(f"{ANNAS_BASE_URL}/md5/"):
-            raise ValueError("url must point to Anna's Archive md5 endpoint")
-        md5 = info.data.get("md5") if info.data else None
-        if md5 and md5 not in normalized:
-            raise ValueError("url must include md5")
-        return normalized
+    def _normalize_optional_text(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @field_validator("title", "format", mode="before")
+    @classmethod
+    def _normalize_required_text(cls, value: Any) -> str:
+        text = str(value).strip() if value is not None else ""
+        if not text:
+            raise ValueError("must be non-empty")
+        return text
+
+    @field_validator("extras", mode="before")
+    @classmethod
+    def _normalize_extras(cls, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            cleaned: List[str] = []
+            for item in value:
+                text = str(item).strip()
+                if text:
+                    cleaned.append(text)
+            return cleaned
+        raise TypeError("extras must be a sequence of strings")
+
+    @field_validator("size_bytes")
+    @classmethod
+    def _validate_size(cls, value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError("size_bytes must be non-negative")
+        return value
 
 
 class Annas:
@@ -142,56 +151,24 @@ class Annas:
         return response
 
     # ────────────────────────────────── Public API ──────────────────────────────────
-    # TODO: Never return anything other than pydantic models or primitive types (no dynamic dicts).
+
     def search(self, query: str, limit: int = 200) -> List[SearchResult]:
-        """Search Anna's Archive cards and return structured result dictionaries.
+        """Search Anna's Archive cards and return structured result models.
 
         The query is stripped and validated before iterating through up to twenty
         result pages (Anna's Archive paginates search responses). Each unique md5
         hash is wrapped in a `SearchResult` model to ensure URL integrity and capture
-        the published metadata (language, format, size, provenance) before serializing
-        into a plain dictionary suitable for CLI output.
+        the published metadata (language, format, size, provenance).
         """
-        # DONE: document search flow and validation expectations.
 
         normalized = query.strip()
         assert normalized, "query must be non-empty"
         assert limit >= 1, "limit must be >= 1"
 
         capped_limit = min(limit, 200)
-        seen_md5: Set[str] = set()
-        seen_titles: Set[str] = set()
-        collected: List[SearchResult] = []
-        page_number = 1
 
-        # TODO: Move scraping and parsing logic to `scrape.py` keep this class focused on workflow using clean models.
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            try:
-                browser_page = browser.new_page()
-                browser_page.set_default_timeout(15000)
-                while len(collected) < capped_limit and page_number <= 20:
-                    logger.info(
-                        "Searching Anna's Archive",
-                        query=normalized,
-                        page=page_number,
-                        current=len(collected),
-                        target=capped_limit,
-                    )
-                    page_results = self._collect_page_results(
-                        browser_page, normalized, page_number, seen_md5, seen_titles
-                    )
-                    if not page_results:
-                        break
-                    collected.extend(page_results)
-                    page_number += 1
-            finally:
-                browser.close()
-
-        logger.info(
-            "Collected {} search results limit={}", len(collected), capped_limit
-        )
-        return collected[:capped_limit]
+        results = scrape_search_results(normalized, limit=capped_limit)
+        return results
 
     def fetch(self, md5: str, collection: Optional[str] = None) -> Path:
         """Download a file by md5, normalize artifacts, and optionally ingest chunks.
@@ -201,7 +178,7 @@ class Annas:
         extracts auxiliary markdown. When `collection` is provided, the derived
         markdown is chunked and upserted into the named Chroma collection.
         """
-        # NOTE: Keep fetching logic in this module.
+
         md5 = self._validate_md5(md5)
         assert (
             self.secret_key
@@ -254,7 +231,7 @@ class Annas:
         preserves a window of `before` and `after` lines from the hit, matching the
         CLI's expectation for compact context previews.
         """
-        # NOTE: Keep pre-fetch artifact search in this module.
+
         md5 = self._validate_md5(md5)
         normalized = needle.strip()
         assert normalized, "needle must be non-empty"
@@ -263,11 +240,10 @@ class Annas:
         assert limit >= 1, "limit must be >= 1"
 
         markdown_path = self._markdown_path_for_md5(md5)
-        # TODO: Remove this and irradicate this pattern from codebase! Error swallowing is never acceptable. Review `AGENTS.md` in ensure all rules are applied with common sense.
-        try:
-            content = markdown_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
+
+        if not markdown_path.exists():
             return ""
+        content = markdown_path.read_text(encoding="utf-8")
 
         lines = content.splitlines()
         if not lines:
@@ -298,19 +274,18 @@ class Annas:
         into human-readable snippets that include chunk order, inferred headings,
         and the originating md5 hash.
         """
-        # NOTE: Keep pre-fetch artifact search in this module.
-        # TODO: Make sure this is well tested in the test suite.
+
         assert query.strip(), "query must be non-empty"
         assert n >= 1, "limit must be >= 1"
         md5_filter: Optional[Where] = None
         if md5s:
             md5_list = [self._validate_md5(m) for m in md5s.split(",") if m.strip()]
             if md5_list:
-                md5_filter = {"md5": {"$in": md5_list}}
+                md5_filter = cast(Where, {"md5": {"$in": md5_list}})
         # Research (2025-09-28): Chroma query returns documents as list per query index;
         # see https://docs.trychroma.com/docs/querying-collections/query-and-get
         collection_client = self._collection(collection)
-        # NOTE: Ok to use this non-pydantic structure as long as it's only internal and direct fit for purpose.
+
         query_result: QueryResult = collection_client.query(
             query_texts=[query],
             n_results=n,
@@ -339,253 +314,6 @@ class Annas:
             )
             assembled.append(snippet)
         return assembled
-
-    # ─────────────────────────────── Internal helpers ───────────────────────────────
-    @staticmethod
-    def _clean_whitespace(value: str) -> str:
-        return " ".join(value.split())
-
-    @staticmethod
-    def _extract_md5(href: str) -> str:
-        path = (href or "").split("?")[0].rstrip("/")
-        candidate = path.split("/")[-1]
-        if re.fullmatch(r"[0-9a-fA-F]{32}", candidate):
-            return candidate.lower()
-        return ""
-
-    def _collect_page_results(
-        self,
-        browser_page: Page,
-        query: str,
-        page_number: int,
-        seen_md5: Set[str],
-        seen_titles: Set[str],
-    ) -> List[SearchResult]:
-        params: Dict[str, str] = {"q": query}
-        if page_number > 1:
-            params["page"] = str(page_number)
-        url = f"{SEARCH_ENDPOINT}?{urlencode(params)}"
-
-        try:
-            browser_page.goto(url, wait_until="networkidle")
-        except PlaywrightTimeoutError:
-            browser_page.wait_for_load_state("domcontentloaded")
-
-        browser_page.wait_for_timeout(400)
-        cards = browser_page.locator(
-            "div.flex.border-b",
-            has=browser_page.locator("a.js-vim-focus"),
-        )
-        card_count = cards.count()
-        if card_count == 0:
-            if self._page_has_no_results(browser_page):
-                return []
-            # If results failed to hydrate, give the page a brief chance and retry once.
-            try:
-                browser_page.wait_for_selector(
-                    "div.flex.border-b a.js-vim-focus",
-                    timeout=3000,
-                )
-            except PlaywrightTimeoutError:
-                return []
-            cards = browser_page.locator(
-                "div.flex.border-b",
-                has=browser_page.locator("a.js-vim-focus"),
-            )
-            card_count = cards.count()
-            if card_count == 0:
-                return []
-
-        page_results: List[SearchResult] = []
-        for index in range(card_count):
-            result = self._parse_result_card(
-                cards.nth(index),
-                seen_md5,
-                seen_titles,
-            )
-            if result is not None:
-                page_results.append(result)
-
-        return page_results
-
-    def _parse_result_card(
-        self,
-        card: Locator,
-        seen_md5: Set[str],
-        seen_titles: Set[str],
-    ) -> Optional[SearchResult]:
-        title_locator = card.locator("a.js-vim-focus").first
-        href = title_locator.get_attribute("href") or ""
-        md5 = self._extract_md5(href)
-        if not md5 or md5 in seen_md5:
-            return None
-
-        title_text_raw = self._locator_inner_text(title_locator)
-        if not title_text_raw:
-            return None
-        title = self._clean_whitespace(title_text_raw)
-        if not title:
-            return None
-        title_key = title.casefold()
-        if title_key in seen_titles:
-            return None
-
-        detail_text = self._locator_inner_text(card.locator("div.text-gray-800").first)
-        detail_metadata = self._parse_detail_text(detail_text)
-
-        description = self._locator_inner_text(card.locator("div.text-gray-600").first)
-        source_path = self._locator_inner_text(card.locator("div.font-mono").first)
-
-        cover_url = None
-        cover_candidates = card.locator("img")
-        if cover_candidates.count():
-            cover_url = cover_candidates.first.get_attribute("src")
-
-        seen_md5.add(md5)
-        seen_titles.add(title_key)
-
-        return SearchResult(
-            md5=md5,
-            title=title,
-            url=urljoin(ANNAS_BASE_URL, href),
-            description=description,
-            source_path=source_path,
-            cover_url=cover_url,
-            **detail_metadata,
-        )
-
-    @staticmethod
-    def _locator_inner_text(locator: Locator) -> Optional[str]:
-        if locator.count() == 0:
-            return None
-        value = locator.inner_text().strip()
-        return value or None
-
-    def _parse_detail_text(self, raw: Optional[str]) -> Dict[str, Any]:
-        if not raw:
-            return {}
-        normalized = self._clean_whitespace(raw.replace("\xa0", " "))
-        if not normalized:
-            return {}
-
-        segments = [segment.strip() for segment in normalized.split("·")]
-        metadata: Dict[str, Any] = {}
-        after_save = False
-        for segment in segments:
-            cleaned = segment.strip()
-            if not cleaned:
-                continue
-            lowered = cleaned.lower()
-            if lowered == "save":
-                after_save = True
-                continue
-            if after_save:
-                count = self._parse_integer(cleaned)
-                if count is not None and "download_count" not in metadata:
-                    metadata["download_count"] = count
-                continue
-
-            if cleaned.startswith("✅"):
-                metadata["is_verified"] = True
-                cleaned = cleaned.lstrip("✅").strip()
-
-            if "language" not in metadata:
-                language_match = re.match(r"(.+?)\s*\[([^\]]+)\]$", cleaned)
-                if language_match:
-                    metadata["language"] = self._clean_whitespace(
-                        language_match.group(1)
-                    )
-                    metadata["language_code"] = language_match.group(2).strip()
-                    continue
-
-            if "file_format" not in metadata and self._looks_like_file_format(cleaned):
-                metadata["file_format"] = cleaned.replace(" ", "")
-                continue
-
-            if "file_size_label" not in metadata:
-                size_data = self._parse_size_label(cleaned)
-                if size_data is not None:
-                    label, size_bytes = size_data
-                    metadata["file_size_label"] = label
-                    metadata["file_size_bytes"] = size_bytes
-                    continue
-
-            if "year" not in metadata and re.fullmatch(r"\d{4}", cleaned):
-                metadata["year"] = int(cleaned)
-                continue
-
-            if "source" not in metadata and cleaned.startswith("🚀"):
-                metadata["source"] = cleaned.lstrip("🚀").strip()
-                continue
-
-            if "category" not in metadata and self._looks_like_category(cleaned):
-                metadata["category"] = self._clean_whitespace(
-                    self._strip_leading_emoji(cleaned)
-                )
-                continue
-
-        return metadata
-
-    @staticmethod
-    def _parse_integer(value: str) -> Optional[int]:
-        cleaned = re.sub(r"[^\d]", "", value)
-        if not cleaned:
-            return None
-        try:
-            return int(cleaned)
-        except ValueError:
-            return None
-
-    @staticmethod
-    def _parse_size_label(value: str) -> Optional[Tuple[str, int]]:
-        match = re.fullmatch(
-            r"(?P<number>[0-9]+(?:[.,][0-9]+)?)\s*(?P<unit>[KMGTP]?B)",
-            value,
-            re.IGNORECASE,
-        )
-        if not match:
-            return None
-        number = float(match.group("number").replace(",", "."))
-        unit = match.group("unit").upper()
-        multipliers = {
-            "B": 1,
-            "KB": 1024,
-            "MB": 1024**2,
-            "GB": 1024**3,
-            "TB": 1024**4,
-            "PB": 1024**5,
-        }
-        multiplier = multipliers.get(unit)
-        if multiplier is None:
-            return None
-        bytes_size = int(number * multiplier)
-        return (value.replace(" ", ""), bytes_size)
-
-    @staticmethod
-    def _strip_leading_emoji(value: str) -> str:
-        # Most icons are single code points; fallback to original string when ascii.
-        if value and not value[0].isascii():
-            return value[1:].strip()
-        return value
-
-    @staticmethod
-    def _looks_like_file_format(value: str) -> bool:
-        if not value or value.endswith("B"):
-            return False
-        if any(char.islower() for char in value):
-            return False
-        tokens = value.replace("/", " ").replace("+", " ").split()
-        return all(token.isalnum() for token in tokens) and any(
-            token.isalpha() for token in tokens
-        )
-
-    @staticmethod
-    def _looks_like_category(value: str) -> bool:
-        return bool(value) and not value[0].isascii() and not value.startswith("🚀")
-
-    @staticmethod
-    def _page_has_no_results(browser_page: Page) -> bool:
-        return browser_page.locator("text=No files found.").count() > 0
 
     def _elements_to_markdown(self, elements: Sequence[ElementLike]) -> str:
         lines: List[str] = []
@@ -660,9 +388,8 @@ class Annas:
         elements: Sequence[ElementLike],
         collection: str,
         text: str,
-        document_metadata: Optional[Dict[str, Optional[List[str] | str]]] = None,
+        document_metadata: Optional[DocumentMetadata] = None,
     ) -> None:
-        document_metadata = document_metadata or {}
         coll = self._collection(collection)
         existing = coll.get(where={"md5": md5})
         ids = existing["ids"]
@@ -671,20 +398,25 @@ class Annas:
         # Research (2025-09-28): Element metadata always available as ElementMetadata with
         # optional page_number/title attributes; see https://docs.unstructured.io/platform/document-elements
         page_numbers = set()
-        doc_title = (document_metadata.get("title") or "").strip()
-        author_name = (document_metadata.get("author") or "").strip()
-        tag_segments = document_metadata.get("extras") or []
-        format_label = (document_metadata.get("format") or "").strip().upper()
-        size_bytes = document_metadata.get("size_bytes")
+        raw_title = document_metadata.title if document_metadata else None
+        doc_title = raw_title.strip() if isinstance(raw_title, str) else ""
+        raw_author = document_metadata.author if document_metadata else None
+        author_name = raw_author.strip() if isinstance(raw_author, str) else ""
+        raw_extras = document_metadata.extras if document_metadata else []
+        tag_segments = list(raw_extras)
+        raw_format = document_metadata.format if document_metadata else ""
+        format_label = raw_format.strip().upper() if isinstance(raw_format, str) else ""
+        size_value = document_metadata.size_bytes if document_metadata else None
+        size_bytes = size_value if isinstance(size_value, int) else None
         title = doc_title
         title_found = False
         for element in elements:
-            metadata = element.metadata
+            element_metadata = element.metadata
             assert isinstance(
-                metadata, ElementMetadata
+                element_metadata, ElementMetadata
             ), "element.metadata must be ElementMetadata"
-            if metadata.page_number is not None:
-                page_numbers.add(metadata.page_number)
+            if element_metadata.page_number is not None:
+                page_numbers.add(element_metadata.page_number)
             if (
                 not title_found
                 and element.category.lower() == "title"
@@ -719,34 +451,38 @@ class Annas:
             if not clean_chunk:
                 continue
             documents.append(clean_chunk)
-            metadata: Dict[str, str] = {
+            chunk_metadata: Dict[str, str] = {
                 "md5": md5,
                 "chunk_index": str(index),
                 "title": title or doc_title or "Untitled",
             }
             if author_name:
-                metadata["author"] = author_name
+                chunk_metadata["author"] = author_name
             if tag_segments:
-                metadata["tags"] = "|".join(tag_segments)
+                chunk_metadata["tags"] = "|".join(tag_segments)
             if format_label:
-                metadata["format"] = format_label
+                chunk_metadata["format"] = format_label
             if isinstance(size_bytes, int):
-                metadata["size_bytes"] = str(size_bytes)
+                chunk_metadata["size_bytes"] = str(size_bytes)
             if page_matches:
                 first = min(page_matches)
                 last = max(page_matches)
-                metadata["page_start"] = str(first)
-                metadata["page_end"] = str(last)
+                chunk_metadata["page_start"] = str(first)
+                chunk_metadata["page_end"] = str(last)
             if page_numbers:
-                metadata["pages_total"] = str(len(page_numbers))
+                chunk_metadata["pages_total"] = str(len(page_numbers))
             chapter = self._extract_chapter(clean_chunk)
-            if chapter and chapter.lower() != metadata["title"].lower():
-                metadata["chapter"] = chapter
-            metadatas.append(metadata)
+            if chapter and chapter.lower() != chunk_metadata["title"].lower():
+                chunk_metadata["chapter"] = chapter
+            metadatas.append(chunk_metadata)
 
         assert documents, "All ingestable chunks were empty after cleaning page markers"
         chunk_ids = [f"{md5}:{index:04d}" for index in range(1, len(documents) + 1)]
-        coll.upsert(ids=chunk_ids, documents=documents, metadatas=metadatas)
+        coll.upsert(
+            ids=chunk_ids,
+            documents=documents,
+            metadatas=cast(List[Metadata], metadatas),
+        )
 
     def _collection(self, name: str) -> Collection:
         if self._chroma_client is None:
@@ -960,30 +696,34 @@ class Annas:
         words = value.replace("_", " ").strip()
         return words.title() if words else ""
 
-    def _document_metadata_from_path(
-        self, path: Path
-    ) -> Dict[str, Optional[List[str] | str]]:
-        stem, _ = self._split_extension(path.name)
+    def _document_metadata_from_path(self, path: Path) -> DocumentMetadata:
+
+        stem, extension = self._split_extension(path.name)
         components = [part for part in stem.split("__") if part]
         size_bytes = path.stat().st_size if path.exists() else None
+        format_label = extension or path.suffix.lstrip(".").lower() or "bin"
         if not components:
-            return {
-                "author": None,
-                "title": path.stem,
-                "extras": [],
-                "format": self._split_extension(path.name)[1],
-                "size_bytes": size_bytes,
-            }
+            return DocumentMetadata(
+                author=None,
+                title=path.stem,
+                extras=[],
+                format=format_label,
+                size_bytes=size_bytes,
+            )
         author_slug = components[0]
         title_slug = components[1] if len(components) > 1 else components[0]
         extras = components[2:]
-        return {
-            "author": self._deslug(author_slug) or None,
-            "title": self._deslug(title_slug) or path.stem,
-            "extras": [self._deslug(part) for part in extras if part],
-            "format": self._split_extension(path.name)[1],
-            "size_bytes": size_bytes,
-        }
+        normalized_author = self._deslug(author_slug) or None
+        normalized_title = self._deslug(title_slug) or path.stem
+        normalized_extras = [self._deslug(part) for part in extras if part]
+
+        return DocumentMetadata(
+            author=normalized_author,
+            title=normalized_title,
+            extras=normalized_extras,
+            format=format_label,
+            size_bytes=size_bytes,
+        )
 
     @staticmethod
     def _extract_chapter(chunk: str) -> Optional[str]:

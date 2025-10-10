@@ -5,7 +5,8 @@ from urllib.parse import quote
 
 import pytest
 
-from annas.cli import ANNAS_BASE_URL, Annas
+from annas.cli import Annas
+from annas.scrape import ANNAS_BASE_URL, SearchResult
 
 QUERIES: List[str] = [
     "philosophy",
@@ -43,25 +44,24 @@ def test_search_result_invariants(tmp_path: Path) -> None:
     if len(sample) < 100:
         pytest.skip("Insufficient search results for invariant checks")
 
-    md5s = [entry["md5"] for entry in sample]
-    urls = [entry["url"] for entry in sample]
-    titles = [entry["title"] for entry in sample]
+    md5s = [entry.md5 for entry in sample]
+    urls = [entry.url for entry in sample]
+    titles = [entry.title for entry in sample]
 
     assert len(sample) == len(set(md5s)), "duplicate md5 values detected"
     assert len(sample) == len(set(urls)), "duplicate urls detected"
     assert len(sample) == len(set(titles)), "duplicate titles detected"
 
     for entry in sample:
-        assert {"md5", "title", "url"}.issubset(entry.keys())
-        assert re.fullmatch(r"[0-9a-f]{32}", entry["md5"])
-        assert entry["md5"] in entry["url"]
-        assert entry["url"].startswith(f"{ANNAS_BASE_URL}/md5/")
-        assert entry["title"] == entry["title"].strip()
-        if "file_format" in entry:
-            assert isinstance(entry["file_format"], str)
-            assert entry["file_format"]
-        if "file_size_label" in entry:
-            assert isinstance(entry["file_size_label"], str)
+        assert isinstance(entry, SearchResult)
+        assert re.fullmatch(r"[0-9a-f]{32}", entry.md5)
+        assert entry.md5 in entry.url
+        assert entry.url.startswith(f"{ANNAS_BASE_URL}/md5/")
+        assert entry.title == entry.title.strip()
+        if entry.file_format is not None:
+            assert entry.file_format
+        if entry.file_size_label is not None:
+            assert entry.file_size_label
 
 
 def test_document_metadata_from_sanitized_filename(tmp_path: Path) -> None:
@@ -75,8 +75,8 @@ def test_document_metadata_from_sanitized_filename(tmp_path: Path) -> None:
     )
     sanitized = annas._sanitize_filename(raw_name, md5)
     metadata = annas._document_metadata_from_path(Path(tmp_path / sanitized))
-    assert metadata["title"] == "The Republic"
-    assert metadata["author"] == "Plato"
+    assert metadata.title == "The Republic"
+    assert metadata.author == "Plato"
 
 
 def test_extract_chapter_heading() -> None:

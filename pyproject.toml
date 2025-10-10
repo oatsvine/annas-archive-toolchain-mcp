@@ -10,7 +10,7 @@ dependencies = [
   "fire",
   "loguru",
   "backoff",
-  "lxml",
+  "playwright",
   "black",
   "pyright",
   "unstructured[md]",
@@ -43,11 +43,6 @@ dev = [
   "langchain-mcp-adapters",
 ]
 
-
-# tui = [
-#   "textual>=0.62.0",
-# ]
-
 # TODO: Moved tts to projects/. Spin off this file into projects/cue-script-tts
 [tool.setuptools]
 packages = ["annas", "tests"]
@@ -65,9 +60,6 @@ override-dependencies = [
 
 [tool.uv.pip]
 prerelease = "allow"
-
-# [tool.uv.extra-build-dependencies]
-# pkuseg = ["numpy"]
 
 [tool.pytest.ini_options]
 testpaths = [
