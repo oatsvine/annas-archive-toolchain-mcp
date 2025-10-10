@@ -5,7 +5,7 @@ from urllib.parse import quote
 
 import pytest
 
-from annas import ANNAS_BASE_URL, Annas
+from annas.cli import ANNAS_BASE_URL, Annas
 
 QUERIES: List[str] = [
     "philosophy",
@@ -52,11 +52,16 @@ def test_search_result_invariants(tmp_path: Path) -> None:
     assert len(sample) == len(set(titles)), "duplicate titles detected"
 
     for entry in sample:
-        assert set(entry.keys()) == {"md5", "title", "url"}
+        assert {"md5", "title", "url"}.issubset(entry.keys())
         assert re.fullmatch(r"[0-9a-f]{32}", entry["md5"])
         assert entry["md5"] in entry["url"]
         assert entry["url"].startswith(f"{ANNAS_BASE_URL}/md5/")
         assert entry["title"] == entry["title"].strip()
+        if "file_format" in entry:
+            assert isinstance(entry["file_format"], str)
+            assert entry["file_format"]
+        if "file_size_label" in entry:
+            assert isinstance(entry["file_size_label"], str)
 
 
 def test_document_metadata_from_sanitized_filename(tmp_path: Path) -> None:

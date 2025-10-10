@@ -53,7 +53,7 @@ dev = [
 packages = ["annas", "tests"]
 
 [tool.pyright]
-include = ["agents","tests"]
+include = ["annas","tests"]
 exclude = ["**/node_modules", "**/__pycache__", "lib"]
 
 [tool.uv]

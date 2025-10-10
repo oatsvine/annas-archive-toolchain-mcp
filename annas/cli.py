@@ -1,37 +1,56 @@
-"""Anna's Archive CLI helper following in-house conventions."""
+"""Utility helpers for interacting with Anna's Archive content.
+
+The module exposes a Fire-compatible CLI that can search Anna's Archive,
+download and normalize artifacts, derive markdown snapshots, and push document
+chunks into a Chroma vector store. All helpers follow the in-house convention
+of typed, fail-fast surface areas.
+"""
 
 from __future__ import annotations
-import shutil
 
-import mobi
+import os
+import re
+import shutil
+import sys
+import unicodedata
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Set, Tuple
+from urllib.parse import unquote, urljoin, urlsplit, urlencode
+
+import backoff
+import certifi
 import chromadb
+import fire
+import mobi
+import requests
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 from chromadb.api.types import QueryResult, Where
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from unstructured.documents.elements import Element, ElementMetadata
-from unstructured.partition.auto import partition
-import os
-import re
-import sys
-import unicodedata
-from pathlib import Path
-from typing import Dict, List, Optional, Set
-from urllib.parse import unquote, urljoin, urlsplit
-
-import backoff
-import certifi
-import fire
-import requests
 from loguru import logger
-from lxml import html
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from playwright.sync_api import (
+    Locator,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
+from unstructured.documents.elements import ElementMetadata
+from unstructured.partition.auto import partition
 
 ANNAS_BASE_URL = "https://annas-archive.org"
 SEARCH_ENDPOINT = f"{ANNAS_BASE_URL}/search"
 FAST_DOWNLOAD_ENDPOINT = f"{ANNAS_BASE_URL}/dyn/api/fast_download.json"
 MD5_PATTERN = re.compile(r"[0-9a-f]{32}", re.IGNORECASE)
 ANNA_BRAND_PATTERN = re.compile(r"anna[’']?s archive", re.IGNORECASE)
+
+
+class ElementLike(Protocol):
+    """Protocol capturing the subset of Element attributes relied on by helpers."""
+
+    text: str
+    category: str
+    metadata: ElementMetadata
 
 
 class SearchResult(BaseModel):
@@ -42,6 +61,19 @@ class SearchResult(BaseModel):
     md5: str = Field(pattern=r"^[0-9a-f]{32}$")
     title: str = Field(min_length=1)
     url: str = Field(min_length=1)
+    is_verified: Optional[bool] = None
+    language: Optional[str] = None
+    language_code: Optional[str] = None
+    file_format: Optional[str] = None
+    file_size_bytes: Optional[int] = Field(default=None, ge=1)
+    file_size_label: Optional[str] = None
+    year: Optional[int] = Field(default=None, ge=0)
+    category: Optional[str] = None
+    source: Optional[str] = None
+    source_path: Optional[str] = None
+    description: Optional[str] = None
+    cover_url: Optional[str] = None
+    download_count: Optional[int] = Field(default=None, ge=0)
 
     @field_validator("md5")
     @staticmethod
@@ -110,8 +142,17 @@ class Annas:
         return response
 
     # ────────────────────────────────── Public API ──────────────────────────────────
-    def search(self, query: str, limit: int = 200) -> List[Dict[str, str]]:
-        """Search Anna's Archive and return up to ``limit`` structured cards."""
+    # TODO: Never return anything other than pydantic models or primitive types (no dynamic dicts).
+    def search(self, query: str, limit: int = 200) -> List[SearchResult]:
+        """Search Anna's Archive cards and return structured result dictionaries.
+
+        The query is stripped and validated before iterating through up to twenty
+        result pages (Anna's Archive paginates search responses). Each unique md5
+        hash is wrapped in a `SearchResult` model to ensure URL integrity and capture
+        the published metadata (language, format, size, provenance) before serializing
+        into a plain dictionary suitable for CLI output.
+        """
+        # DONE: document search flow and validation expectations.
 
         normalized = query.strip()
         assert normalized, "query must be non-empty"
@@ -121,31 +162,46 @@ class Annas:
         seen_md5: Set[str] = set()
         seen_titles: Set[str] = set()
         collected: List[SearchResult] = []
+        page_number = 1
 
-        page = 1
-        while len(collected) < capped_limit and page <= 20:
-            logger.info(
-                "Searching Anna's Archive",
-                query=normalized,
-                page=page,
-                current=len(collected),
-                target=capped_limit,
-            )
-            page_results = self._collect_page_results(
-                normalized, page, seen_md5, seen_titles
-            )
-            if not page_results:
-                break
-            collected.extend(page_results)
-            page += 1
+        # TODO: Move scraping and parsing logic to `scrape.py` keep this class focused on workflow using clean models.
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                browser_page = browser.new_page()
+                browser_page.set_default_timeout(15000)
+                while len(collected) < capped_limit and page_number <= 20:
+                    logger.info(
+                        "Searching Anna's Archive",
+                        query=normalized,
+                        page=page_number,
+                        current=len(collected),
+                        target=capped_limit,
+                    )
+                    page_results = self._collect_page_results(
+                        browser_page, normalized, page_number, seen_md5, seen_titles
+                    )
+                    if not page_results:
+                        break
+                    collected.extend(page_results)
+                    page_number += 1
+            finally:
+                browser.close()
 
-        logger.info("Collected {count} search results", count=len(collected))
-        sliced = collected[:capped_limit]
-        return [
-            result.model_dump(by_alias=True, exclude_none=True) for result in sliced
-        ]
+        logger.info(
+            "Collected {} search results limit={}", len(collected), capped_limit
+        )
+        return collected[:capped_limit]
 
     def fetch(self, md5: str, collection: Optional[str] = None) -> Path:
+        """Download a file by md5, normalize artifacts, and optionally ingest chunks.
+
+        The method validates the md5, invokes the fast download endpoint with the
+        configured secret key, streams the payload into the work directory, and
+        extracts auxiliary markdown. When `collection` is provided, the derived
+        markdown is chunked and upserted into the named Chroma collection.
+        """
+        # NOTE: Keep fetching logic in this module.
         md5 = self._validate_md5(md5)
         assert (
             self.secret_key
@@ -191,6 +247,14 @@ class Annas:
     def search_text(
         self, md5: str, needle: str, before: int = 2, after: int = 2, limit: int = 3
     ) -> str:
+        """Return markdown snippets around a needle for an existing md5 artifact.
+
+        The method loads the cached markdown (if present), scans for case-insensitive
+        occurrences of `needle`, and returns up to `limit` snippets. Each snippet
+        preserves a window of `before` and `after` lines from the hit, matching the
+        CLI's expectation for compact context previews.
+        """
+        # NOTE: Keep pre-fetch artifact search in this module.
         md5 = self._validate_md5(md5)
         normalized = needle.strip()
         assert normalized, "needle must be non-empty"
@@ -199,6 +263,7 @@ class Annas:
         assert limit >= 1, "limit must be >= 1"
 
         markdown_path = self._markdown_path_for_md5(md5)
+        # TODO: Remove this and irradicate this pattern from codebase! Error swallowing is never acceptable. Review `AGENTS.md` in ensure all rules are applied with common sense.
         try:
             content = markdown_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -226,6 +291,15 @@ class Annas:
     def query_text(
         self, collection: str, query: str, n: int, md5s: Optional[str] = None
     ) -> List[str]:
+        """Query a Chroma collection and format the best-matching document chunks.
+
+        Results are constrained by `md5s` when provided, otherwise the full
+        collection is searched. The raw Chroma payload is validated and rendered
+        into human-readable snippets that include chunk order, inferred headings,
+        and the originating md5 hash.
+        """
+        # NOTE: Keep pre-fetch artifact search in this module.
+        # TODO: Make sure this is well tested in the test suite.
         assert query.strip(), "query must be non-empty"
         assert n >= 1, "limit must be >= 1"
         md5_filter: Optional[Where] = None
@@ -236,6 +310,7 @@ class Annas:
         # Research (2025-09-28): Chroma query returns documents as list per query index;
         # see https://docs.trychroma.com/docs/querying-collections/query-and-get
         collection_client = self._collection(collection)
+        # NOTE: Ok to use this non-pydantic structure as long as it's only internal and direct fit for purpose.
         query_result: QueryResult = collection_client.query(
             query_texts=[query],
             n_results=n,
@@ -279,45 +354,240 @@ class Annas:
         return ""
 
     def _collect_page_results(
-        self, query: str, page: int, seen_md5: Set[str], seen_titles: Set[str]
+        self,
+        browser_page: Page,
+        query: str,
+        page_number: int,
+        seen_md5: Set[str],
+        seen_titles: Set[str],
     ) -> List[SearchResult]:
-        params = {"q": query.strip(), "page": str(page)}
-        response = self._retrying_get(self._session, SEARCH_ENDPOINT, params=params)
-        tree = html.fromstring(response.content)
+        params: Dict[str, str] = {"q": query}
+        if page_number > 1:
+            params["page"] = str(page_number)
+        url = f"{SEARCH_ENDPOINT}?{urlencode(params)}"
 
-        anchors = tree.xpath(
-            "//a[contains(concat(' ', normalize-space(@class), ' '), ' js-vim-focus ')"
-            " and starts-with(@href, '/md5/')]"
+        try:
+            browser_page.goto(url, wait_until="networkidle")
+        except PlaywrightTimeoutError:
+            browser_page.wait_for_load_state("domcontentloaded")
+
+        browser_page.wait_for_timeout(400)
+        cards = browser_page.locator(
+            "div.flex.border-b",
+            has=browser_page.locator("a.js-vim-focus"),
         )
+        card_count = cards.count()
+        if card_count == 0:
+            if self._page_has_no_results(browser_page):
+                return []
+            # If results failed to hydrate, give the page a brief chance and retry once.
+            try:
+                browser_page.wait_for_selector(
+                    "div.flex.border-b a.js-vim-focus",
+                    timeout=3000,
+                )
+            except PlaywrightTimeoutError:
+                return []
+            cards = browser_page.locator(
+                "div.flex.border-b",
+                has=browser_page.locator("a.js-vim-focus"),
+            )
+            card_count = cards.count()
+            if card_count == 0:
+                return []
 
         page_results: List[SearchResult] = []
-        for anchor in anchors:
-            href = anchor.get("href") or ""
-            md5 = self._extract_md5(href)
-            if not md5 or md5 in seen_md5:
-                continue
-
-            title = self._clean_whitespace(anchor.text_content())
-            if not title:
-                continue
-            title_key = title.casefold()
-            if title_key in seen_titles:
-                continue
-
-            seen_md5.add(md5)
-            seen_titles.add(title_key)
-
-            page_results.append(
-                SearchResult(
-                    md5=md5,
-                    title=title,
-                    url=urljoin(ANNAS_BASE_URL, href),
-                )
+        for index in range(card_count):
+            result = self._parse_result_card(
+                cards.nth(index),
+                seen_md5,
+                seen_titles,
             )
+            if result is not None:
+                page_results.append(result)
 
         return page_results
 
-    def _elements_to_markdown(self, elements: List[Element]) -> str:
+    def _parse_result_card(
+        self,
+        card: Locator,
+        seen_md5: Set[str],
+        seen_titles: Set[str],
+    ) -> Optional[SearchResult]:
+        title_locator = card.locator("a.js-vim-focus").first
+        href = title_locator.get_attribute("href") or ""
+        md5 = self._extract_md5(href)
+        if not md5 or md5 in seen_md5:
+            return None
+
+        title_text_raw = self._locator_inner_text(title_locator)
+        if not title_text_raw:
+            return None
+        title = self._clean_whitespace(title_text_raw)
+        if not title:
+            return None
+        title_key = title.casefold()
+        if title_key in seen_titles:
+            return None
+
+        detail_text = self._locator_inner_text(card.locator("div.text-gray-800").first)
+        detail_metadata = self._parse_detail_text(detail_text)
+
+        description = self._locator_inner_text(card.locator("div.text-gray-600").first)
+        source_path = self._locator_inner_text(card.locator("div.font-mono").first)
+
+        cover_url = None
+        cover_candidates = card.locator("img")
+        if cover_candidates.count():
+            cover_url = cover_candidates.first.get_attribute("src")
+
+        seen_md5.add(md5)
+        seen_titles.add(title_key)
+
+        return SearchResult(
+            md5=md5,
+            title=title,
+            url=urljoin(ANNAS_BASE_URL, href),
+            description=description,
+            source_path=source_path,
+            cover_url=cover_url,
+            **detail_metadata,
+        )
+
+    @staticmethod
+    def _locator_inner_text(locator: Locator) -> Optional[str]:
+        if locator.count() == 0:
+            return None
+        value = locator.inner_text().strip()
+        return value or None
+
+    def _parse_detail_text(self, raw: Optional[str]) -> Dict[str, Any]:
+        if not raw:
+            return {}
+        normalized = self._clean_whitespace(raw.replace("\xa0", " "))
+        if not normalized:
+            return {}
+
+        segments = [segment.strip() for segment in normalized.split("·")]
+        metadata: Dict[str, Any] = {}
+        after_save = False
+        for segment in segments:
+            cleaned = segment.strip()
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            if lowered == "save":
+                after_save = True
+                continue
+            if after_save:
+                count = self._parse_integer(cleaned)
+                if count is not None and "download_count" not in metadata:
+                    metadata["download_count"] = count
+                continue
+
+            if cleaned.startswith("✅"):
+                metadata["is_verified"] = True
+                cleaned = cleaned.lstrip("✅").strip()
+
+            if "language" not in metadata:
+                language_match = re.match(r"(.+?)\s*\[([^\]]+)\]$", cleaned)
+                if language_match:
+                    metadata["language"] = self._clean_whitespace(
+                        language_match.group(1)
+                    )
+                    metadata["language_code"] = language_match.group(2).strip()
+                    continue
+
+            if "file_format" not in metadata and self._looks_like_file_format(cleaned):
+                metadata["file_format"] = cleaned.replace(" ", "")
+                continue
+
+            if "file_size_label" not in metadata:
+                size_data = self._parse_size_label(cleaned)
+                if size_data is not None:
+                    label, size_bytes = size_data
+                    metadata["file_size_label"] = label
+                    metadata["file_size_bytes"] = size_bytes
+                    continue
+
+            if "year" not in metadata and re.fullmatch(r"\d{4}", cleaned):
+                metadata["year"] = int(cleaned)
+                continue
+
+            if "source" not in metadata and cleaned.startswith("🚀"):
+                metadata["source"] = cleaned.lstrip("🚀").strip()
+                continue
+
+            if "category" not in metadata and self._looks_like_category(cleaned):
+                metadata["category"] = self._clean_whitespace(
+                    self._strip_leading_emoji(cleaned)
+                )
+                continue
+
+        return metadata
+
+    @staticmethod
+    def _parse_integer(value: str) -> Optional[int]:
+        cleaned = re.sub(r"[^\d]", "", value)
+        if not cleaned:
+            return None
+        try:
+            return int(cleaned)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_size_label(value: str) -> Optional[Tuple[str, int]]:
+        match = re.fullmatch(
+            r"(?P<number>[0-9]+(?:[.,][0-9]+)?)\s*(?P<unit>[KMGTP]?B)",
+            value,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        number = float(match.group("number").replace(",", "."))
+        unit = match.group("unit").upper()
+        multipliers = {
+            "B": 1,
+            "KB": 1024,
+            "MB": 1024**2,
+            "GB": 1024**3,
+            "TB": 1024**4,
+            "PB": 1024**5,
+        }
+        multiplier = multipliers.get(unit)
+        if multiplier is None:
+            return None
+        bytes_size = int(number * multiplier)
+        return (value.replace(" ", ""), bytes_size)
+
+    @staticmethod
+    def _strip_leading_emoji(value: str) -> str:
+        # Most icons are single code points; fallback to original string when ascii.
+        if value and not value[0].isascii():
+            return value[1:].strip()
+        return value
+
+    @staticmethod
+    def _looks_like_file_format(value: str) -> bool:
+        if not value or value.endswith("B"):
+            return False
+        if any(char.islower() for char in value):
+            return False
+        tokens = value.replace("/", " ").replace("+", " ").split()
+        return all(token.isalnum() for token in tokens) and any(
+            token.isalpha() for token in tokens
+        )
+
+    @staticmethod
+    def _looks_like_category(value: str) -> bool:
+        return bool(value) and not value[0].isascii() and not value.startswith("🚀")
+
+    @staticmethod
+    def _page_has_no_results(browser_page: Page) -> bool:
+        return browser_page.locator("text=No files found.").count() > 0
+
+    def _elements_to_markdown(self, elements: Sequence[ElementLike]) -> str:
         lines: List[str] = []
         list_buffer: List[str] = []
         last_page: Optional[int] = None
@@ -387,7 +657,7 @@ class Annas:
     def _load_elements(
         self,
         md5: str,
-        elements: List[Element],
+        elements: Sequence[ElementLike],
         collection: str,
         text: str,
         document_metadata: Optional[Dict[str, Optional[List[str] | str]]] = None,
@@ -443,9 +713,9 @@ class Annas:
         metadatas: List[Dict[str, str]] = []
         for index, chunk in enumerate(raw_chunks, start=1):
             page_matches = [
-                int(match) for match in re.findall(r"<!-- page (\\d+) -->", chunk)
+                int(match) for match in re.findall(r"<!-- page (\d+) -->", chunk)
             ]
-            clean_chunk = re.sub(r"<!-- page \\d+ -->\\s*", "", chunk).strip()
+            clean_chunk = re.sub(r"<!-- page \d+ -->\s*", "", chunk).strip()
             if not clean_chunk:
                 continue
             documents.append(clean_chunk)
@@ -518,7 +788,6 @@ class Annas:
                 target_file = converted_path
             except Exception as exc:  # pylint: disable=broad-except
                 logger.warning("MOBI conversion failed: {}", exc)
-                breakpoint()
         detected_extension = self._detect_extension(target_file)
         expected_extension = target_file.suffix.lstrip(".").lower()
         assert (

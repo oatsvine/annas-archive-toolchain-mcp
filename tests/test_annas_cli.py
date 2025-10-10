@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import List, cast
 
 import pytest
 from unstructured.documents.elements import ElementMetadata
 
-from annas import ANNAS_BASE_URL, Annas
+from annas.cli import ANNAS_BASE_URL, Annas, ElementLike
 
 
 def _metadata(
@@ -40,12 +41,20 @@ def test_search_returns_results(workdir: Path) -> None:
     assert results, "Expected at least one search result for 'plato'"
     assert len(results) <= 5
     for entry in results:
-        assert set(entry.keys()) == {"md5", "title", "url"}
+        assert {"md5", "title", "url"}.issubset(entry.keys())
         assert len(entry["md5"]) == 32
         assert entry["md5"].islower()
         assert entry["md5"] in entry["url"]
         assert entry["url"].startswith(f"{ANNAS_BASE_URL}/md5/")
         assert entry["title"] == entry["title"].strip()
+        if "file_size_bytes" in entry:
+            assert isinstance(entry["file_size_bytes"], int)
+            assert entry["file_size_bytes"] > 0
+        if "download_count" in entry:
+            assert isinstance(entry["download_count"], int)
+            assert entry["download_count"] >= 0
+        if "cover_url" in entry:
+            assert entry["cover_url"].startswith("http")
 
 
 def test_fetch_real_download_when_secret_key_present(workdir: Path) -> None:
@@ -84,7 +93,9 @@ def test_sanitize_filename_truncates_and_preserves_extension(workdir: Path) -> N
 
 def test_elements_to_markdown_formats_titles_and_lists(workdir: Path) -> None:
     annas = Annas(work_path=workdir)
-    elements = [
+    elements = cast(
+        List[ElementLike],
+        [
         SimpleNamespace(
             text="Introduction", category="Title", metadata=_metadata(page=1, depth=1)
         ),
@@ -103,7 +114,8 @@ def test_elements_to_markdown_formats_titles_and_lists(workdir: Path) -> None:
         SimpleNamespace(
             text="Final text", category="NarrativeText", metadata=_metadata(page=2)
         ),
-    ]
+        ],
+    )
 
     markdown = annas._elements_to_markdown(elements)
     assert "# Introduction" in markdown
@@ -117,14 +129,17 @@ def test_chromadb_ingest_and_query(workdir: Path) -> None:
     annas = Annas(work_path=workdir)
     collection = "test-chroma"
     md5 = "a" * 32
-    elements = [
+    elements = cast(
+        List[ElementLike],
+        [
         SimpleNamespace(
             text="Intro section", category="Title", metadata=_metadata(page=1, depth=1)
         ),
         SimpleNamespace(
             text="Content line", category="NarrativeText", metadata=_metadata(page=1)
         ),
-    ]
+        ],
+    )
     text = annas._elements_to_markdown(elements)
     annas._load_elements(md5, elements, collection, text)
     annas._load_elements(md5, elements, collection, text)
@@ -133,7 +148,9 @@ def test_chromadb_ingest_and_query(workdir: Path) -> None:
     assert ids and all(identifier.startswith(f"{md5}:") for identifier in ids)
     # ensure dedupe removed duplicates
     assert len(ids) == len(set(ids))
-    metadata = stored["metadatas"][0]
+    metadatas = stored["metadatas"]
+    assert metadatas is not None
+    metadata = metadatas[0]
     assert metadata["md5"] == md5
     results = annas.query_text(collection, "Intro", 1)
     assert results and "Intro" in results[0]
