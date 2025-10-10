@@ -1,0 +1,75 @@
+[project]
+name = "annas-archive-toolchain-mcp"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+  "pydantic>=2.11.4",
+  "rich",
+  "fire",
+  "loguru",
+  "backoff",
+  "lxml",
+  "black",
+  "pyright",
+  "unstructured[md]",
+  "mobi",
+  "pypandoc",
+  "html2text",
+  "markdown",
+  "EbookLib",
+  # "ftfy",
+  "prettytable",
+  "httpx",
+  "chromadb",
+  "fastmcp",
+]
+
+[project.optional-dependencies]
+db = [
+  "sqlmodel>=0.0.24",
+  "pgvector>=0.4.1",
+]
+
+langchain = [
+  "langchain",
+  "langchain-text-splitters",
+]
+
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "langchain-mcp-adapters",
+]
+
+
+# tui = [
+#   "textual>=0.62.0",
+# ]
+
+# TODO: Moved tts to projects/. Spin off this file into projects/cue-script-tts
+[tool.setuptools]
+packages = ["annas", "tests"]
+
+[tool.pyright]
+include = ["agents","tests"]
+exclude = ["**/node_modules", "**/__pycache__", "lib"]
+
+[tool.uv]
+override-dependencies = [
+  "langchain>=1.0.0a6",
+  "langgraph>=1.0.0a4",
+  "langchain-openai>=1.0.0a3",
+]
+
+[tool.uv.pip]
+prerelease = "allow"
+
+# [tool.uv.extra-build-dependencies]
+# pkuseg = ["numpy"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
