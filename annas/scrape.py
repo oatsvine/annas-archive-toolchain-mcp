@@ -58,7 +58,9 @@ class SearchResult(BaseModel):
         return normalized
 
 
-def scrape_search_results(query: str, *, limit: int, max_pages: int = 20) -> List[SearchResult]:
+def scrape_search_results(
+    query: str, *, limit: int, max_pages: int = 20
+) -> List[SearchResult]:
     """Scrape Anna's Archive search pages with Playwright and return structured results."""
     assert query, "query must be non-empty"
     assert limit >= 1, "limit must be >= 1"
@@ -76,11 +78,10 @@ def scrape_search_results(query: str, *, limit: int, max_pages: int = 20) -> Lis
             browser_page.set_default_timeout(15000)
             while len(collected) < limit and page_number <= max_pages:
                 logger.info(
-                    "Searching Anna's Archive",
-                    query=query,
-                    page=page_number,
-                    current=len(collected),
-                    target=limit,
+                    "Collecting search results: page={} collected={}/{}",
+                    page_number,
+                    len(collected),
+                    limit,
                 )
                 page_results = _collect_page_results(
                     browser_page, query, page_number, seen_md5, seen_titles

@@ -8,10 +8,11 @@ of typed, fail-fast surface areas.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
-import sys
+from rich.pretty import pretty_repr
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Sequence, cast
@@ -32,6 +33,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from annas.scrape import ANNAS_BASE_URL, SearchResult, scrape_search_results
 from unstructured.documents.elements import ElementMetadata
 from unstructured.partition.auto import partition
+
+# from unstructured.metrics.evaluate import evaluate_extraction
 
 FAST_DOWNLOAD_ENDPOINT = f"{ANNAS_BASE_URL}/dyn/api/fast_download.json"
 MD5_PATTERN = re.compile(r"[0-9a-f]{32}", re.IGNORECASE)
@@ -101,18 +104,21 @@ class DocumentMetadata(BaseModel):
         return value
 
 
+class ArtifactValidationError(RuntimeError):
+    """Raised when a downloaded artifact fails structural validation."""
+
+
 class Annas:
     def __init__(
         self,
-        work_path: Path | str = os.environ.get("ANNAS_DOWNLOAD_PATH", ""),
-        secret_key: Optional[str] = None,
+        work_path: Path | str = os.environ.get("ANNAS_DOWNLOAD_PATH", "/tmp/annas"),
+        secret_key: Optional[str] = os.environ.get("ANNAS_SECRET_KEY"),
     ) -> None:
 
         self.work_path = Path(work_path).resolve()
         self.work_path.mkdir(parents=True, exist_ok=True)
 
-        env_secret = secret_key or os.environ.get("ANNAS_SECRET_KEY")
-        self.secret_key = env_secret
+        self.secret_key = secret_key
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -146,25 +152,32 @@ class Annas:
 
     # ────────────────────────────────── Public API ──────────────────────────────────
 
-    def search_catalog(self, query: str, limit: int = 200) -> List[SearchResult]:
-        """Search the live Anna's Archive catalog and return structured results.
-
-        The query is stripped and validated before iterating through up to twenty
-        result pages (Anna's Archive paginates search responses). Each unique md5
-        hash is wrapped in a `SearchResult` model to ensure URL integrity and capture
-        the published metadata (language, format, size, provenance).
-        """
+    def _search_catalog(self, query: str, limit: int = 20) -> List[SearchResult]:
 
         normalized = query.strip()
         assert normalized, "query must be non-empty"
         assert limit >= 1, "limit must be >= 1"
+        logger.info("Searching '{}'... limit={}", normalized, limit)
 
         capped_limit = min(limit, 200)
 
         results = scrape_search_results(normalized, limit=capped_limit)
         return results
 
-    def download_artifact(self, md5: str, collection: Optional[str] = None) -> Path:
+    def search_catalog(self, query: str, limit: int = 20) -> List[str]:
+        """Search the live Anna's Archive catalog and return structured results.
+
+        The query is stripped and validated before iterating through up to twenty
+        result pages (Anna's Archive paginates search responses). Each unique md5
+        hash is wrapped in a `SearchResult` model to ensure URL integrity and capture
+        the published metadata (language, format, size, provenance).
+
+        Returns JSONL array of `SearchResult` objects.
+        """
+        res = self._search_catalog(query, limit=limit)
+        return [r.model_dump_json(exclude_unset=True) for r in res]
+
+    def download(self, md5: str, collection: Optional[str] = None) -> Path:
         """Download a file by md5, normalize artifacts, and optionally ingest chunks.
 
         The method validates the md5, invokes the fast download endpoint with the
@@ -179,23 +192,61 @@ class Annas:
         ), "ANNAS_SECRET_KEY environment variable is required for downloads"
 
         logger.info("Fetching md5={md5}", md5=md5)
-        params = {"md5": md5, "key": self.secret_key}
-        response = self._retrying_get(
-            self._session, FAST_DOWNLOAD_ENDPOINT, params=params
-        )
+        last_error: Optional[Exception] = None
+        download_path: Optional[Path] = None
+        path_candidates: List[Optional[int]] = [None, 1, 2]
+        domain_candidates: List[Optional[int]] = [None, 1, 2, 3]
+        for path_index in path_candidates:
+            for domain_index in domain_candidates:
+                params = {"md5": md5, "key": self.secret_key}
+                if path_index is not None:
+                    params["path_index"] = str(path_index)
+                if domain_index is not None:
+                    params["domain_index"] = str(domain_index)
+                try:
+                    response = self._retrying_get(
+                        self._session, FAST_DOWNLOAD_ENDPOINT, params=params
+                    )
+                except requests.HTTPError as exc:
+                    logger.warning(
+                        "Fast download request failed for path {} domain {}: {}",
+                        path_index or 0,
+                        domain_index or 0,
+                        exc,
+                    )
+                    last_error = exc
+                    continue
 
-        payload = response.json()
-        download_url = payload.get("download_url")
-        assert download_url, payload.get("error") or "fast download API returned no URL"
+                payload = response.json()
+                download_url = payload.get("download_url")
+                assert download_url, (
+                    payload.get("error") or "fast download API returned no URL"
+                )
 
-        download_response = self._retrying_get(
-            self._session,
-            download_url,
-            stream=True,
-            timeout=300,
-        )
+                try:
+                    download_response = self._retrying_get(
+                        self._session,
+                        download_url,
+                        stream=True,
+                        timeout=300,
+                    )
+                    download_path = self._write_stream(md5, download_response)
+                    break
+                except ArtifactValidationError as exc:
+                    logger.warning(
+                        "Path {} domain {} returned invalid artifact: {}",
+                        path_index or 0,
+                        domain_index or 0,
+                        exc,
+                    )
+                    last_error = exc
+                    continue
+            if download_path is not None:
+                break
 
-        download_path = self._write_stream(md5, download_response)
+        assert (
+            download_path is not None
+        ), f"Failed to download valid artifact: {last_error}"
         detected_extension = self._detect_extension(download_path)
         assert detected_extension is not None, "Unable to detect downloaded file format"
         document_metadata = self._document_metadata_from_path(download_path)
@@ -258,8 +309,39 @@ class Annas:
 
         return "\n\n".join(snippets)
 
+    def metadata(
+        self, collection: str, n: int = 10, md5s: Optional[str] = None
+    ) -> List[str]:
+        # TODO: Make private collection search helper to avoid duplication (see query_collection)
+        md5_filter: Optional[Where] = None
+        if md5s:
+            md5_list = [self._validate_md5(m) for m in md5s.split(",") if m.strip()]
+            if md5_list:
+                md5_filter = cast(Where, {"md5": {"$in": md5_list}})
+        collection_client = self._collection(collection)
+        query_result: QueryResult = collection_client.query(
+            n_results=n,
+            where=md5_filter,
+            include=["documents", "metadatas"],
+        )
+        docs = query_result["documents"]
+        assert docs is not None, "Chroma query must return documents"
+        assert docs, "Chroma query returned no document rows"
+        metadatas = query_result["metadatas"]
+        primary_docs: List[str] = docs[0]
+        assert metadatas and len(metadatas[0]) == len(
+            primary_docs
+        ), "Metadata count mismatch"
+        assert primary_docs, "Chroma query returned empty document set"
+        assembled: List[str] = []
+        for i, doc in enumerate(primary_docs):
+            # Make beautiful heading
+            meta = metadatas[0][i] or {}
+            assembled.append(json.dumps(meta))
+        return assembled
+
     def query_collection(
-        self, collection: str, query: str, n: int, md5s: Optional[str] = None
+        self, collection: str, query: str, n: int = 10, md5s: Optional[str] = None
     ) -> List[str]:
         """Query a Chroma collection and format the best-matching document chunks.
 
@@ -290,6 +372,7 @@ class Annas:
         assert docs is not None, "Chroma query must return documents"
         assert docs, "Chroma query returned no document rows"
         metadatas = query_result["metadatas"]
+        print(pretty_repr(metadatas))
         primary_docs: List[str] = docs[0]
         assert metadatas and len(metadatas[0]) == len(
             primary_docs
@@ -299,11 +382,12 @@ class Annas:
         for i, doc in enumerate(primary_docs):
             # Make beautiful heading
             meta = metadatas[0][i] or {}
+            doc_id = query_result["ids"][0][i]
             base_title = meta.get("title") or "Untitled"
             chapter = meta.get("chapter")
             heading = base_title if not chapter else f"{base_title} — {chapter}"
             snippet = (
-                f"─────────────────── Chunk {i+1} - {heading} ({meta.get('md5', 'unknown')}) ───────────────────\n\n"
+                f"─────────────────── Chunk {i+1} - {heading} ({doc_id}) ───────────────────\n\n"
                 f"{doc.strip()}\n"
             )
             assembled.append(snippet)
@@ -524,11 +608,12 @@ class Annas:
             expected_extension
         ), "Downloaded file is missing an extension in the Content-Disposition header"
         if detected_extension is not None:
-            assert detected_extension.lower() == expected_extension, (
+            assert self._extensions_match(expected_extension, detected_extension), (
                 "Downloaded file extension mismatch",
                 expected_extension,
                 detected_extension,
             )
+        self._assert_readable_container(target_file, expected_extension)
         return target_file
 
     def _filename_from_response(self, md5: str, response: requests.Response) -> str:
@@ -609,6 +694,28 @@ class Annas:
         without_md5 = MD5_PATTERN.sub("", value)
         without_target_md5 = without_md5.replace(md5, "")
         return ANNA_BRAND_PATTERN.sub("", without_target_md5)
+
+    @staticmethod
+    def _extensions_match(expected: str, detected: str) -> bool:
+        expected_lower = expected.lower()
+        detected_lower = detected.lower()
+        if detected_lower == expected_lower:
+            return True
+        # EPUB/DOCX ship as ZIP containers; some uploads miss proper metadata.
+        if detected_lower == "zip" and expected_lower in {"epub", "docx"}:
+            return True
+        return False
+
+    @staticmethod
+    def _assert_readable_container(path: Path, extension: str) -> None:
+        lowered = extension.lower()
+        if lowered in {"epub", "docx"}:
+            import zipfile
+
+            if not zipfile.is_zipfile(path):
+                raise ArtifactValidationError(
+                    f"Corrupt {lowered} container: {path.name}"
+                )
 
     @staticmethod
     def _extract_segments(value: str) -> List[str]:
@@ -756,19 +863,3 @@ class Annas:
 
 if __name__ == "__main__":
     fire.Fire(Annas)
-
-
-# • Lessons Learned
-
-#   - Lean on Typed Element APIs Instead of getattr
-#     Feedback: Falling back to getattr on Unstructured elements diluted type safety and contradicted the “strongly typed, deterministic” convention.
-#     Lesson: When a library documents stable attributes (e.g., Element.text, Element.metadata.page_number), access them directly and fail fast if they are missing; don’t normalize away type errors with permissive lookups. This keeps contracts explicit and surfaces upstream extraction issues immediately.
-#   - Chunk Text with Proven Splitters Before Vector Ingestion
-#     Feedback: Loading entire markdown files into Chroma ignored guidance to manage chunk size/overlap internally.
-#     Lesson: Always split long documents with a domain-appropriate strategy (e.g., RecursiveCharacterTextSplitter) and store overlapping chunks before embedding; this preserves semantic context and aligns with our retrieval-augmented workflows.
-#   - Use Asserts for Deterministic Preconditions, Reserve try/except for External Failures
-#     Feedback: Wrapping imports and core invariants in try/except created hidden fallbacks even though those dependencies are fully deterministic and under our control.
-#     Lesson: Guard predictable preconditions with single asserts and let violations crash loudly; only catch exceptions when interfacing with non-deterministic, third-party steps (e.g., mobi.extract) where failures are expected and we still want to preserve already-downloaded artifacts.
-#   - Decode and Normalize Filenames Before Sanitizing
-#     Feedback: Leaving percent-style sequences (e.g., `_20`) in output paths produced unreadable artifacts and broke downstream tooling.
-#     Lesson: Expand encoded segments to their Unicode characters before applying the usual filename sanitizer so derived artifacts stay human-readable without weakening the safety checks.

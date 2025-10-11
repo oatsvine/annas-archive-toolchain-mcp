@@ -64,7 +64,8 @@ def build_server(
     ) -> Path:
         """Retrieve the selected book and optionally ingest its markdown into a vector collection."""
         await ctx.info(
-            f"Downloading md5={md5}" + (f" into collection={collection}" if collection else "")
+            f"Downloading md5={md5}"
+            + (f" into collection={collection}" if collection else "")
         )
         return await asyncio.to_thread(annas.download_artifact, md5, collection)
 
@@ -116,12 +117,12 @@ def build_server(
 
 
 def run_server(
-    work_path: Path | str = os.environ.get("ANNAS_DOWNLOAD_PATH", ""),
-    secret_key: Optional[str] = None,
+    work_path: Path | str = os.environ.get("ANNAS_DOWNLOAD_PATH", "/tmp/annas"),
+    secret_key: Optional[str] = os.environ.get("ANNAS_SECRET_KEY"),
     name: str = DEFAULT_SERVER_NAME,
     instructions: str = DEFAULT_INSTRUCTIONS,
 ) -> None:
-    annas = Annas(work_path=Path(work_path).resolve(), secret_key=secret_key)
+    annas = Annas(work_path=work_path, secret_key=secret_key)
     server = build_server(annas=annas, name=name, instructions=instructions)
     server.run()
 
