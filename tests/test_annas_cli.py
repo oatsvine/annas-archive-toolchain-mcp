@@ -137,5 +137,6 @@ def test_chromadb_ingest_and_query(workdir: Path) -> None:
     assert metadatas is not None
     metadata = metadatas[0]
     assert metadata["md5"] == md5
+    assert metadata["filename"].startswith(md5)
     results = annas.query_collection(collection, "Intro", 1)
     assert results and "Intro" in results[0]

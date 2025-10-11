@@ -27,12 +27,14 @@ import requests
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 from chromadb.api.types import Metadata, QueryResult, Where
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from annas.scrape import ANNAS_BASE_URL, SearchResult, scrape_search_results
-from unstructured.documents.elements import ElementMetadata
+from unstructured.chunking.basic import chunk_elements
+from unstructured.documents.elements import Element, ElementMetadata, ListItem, Title
+from unstructured.file_utils.filetype import detect_filetype
 from unstructured.partition.auto import partition
+from unstructured.staging.base import element_to_md
 
 # from unstructured.metrics.evaluate import evaluate_extraction
 
@@ -56,6 +58,7 @@ class DocumentMetadata(BaseModel):
 
     author: Optional[str] = Field(default=None, description="Primary author name")
     title: str = Field(min_length=1, description="Normalized title")
+    filename: str = Field(min_length=1, description="Sanitized filename")
     extras: List[str] = Field(
         default_factory=list, description="Additional metadata segments"
     )
@@ -72,7 +75,7 @@ class DocumentMetadata(BaseModel):
         text = str(value).strip()
         return text or None
 
-    @field_validator("title", "format", mode="before")
+    @field_validator("title", "format", "filename", mode="before")
     @classmethod
     def _normalize_required_text(cls, value: Any) -> str:
         text = str(value).strip() if value is not None else ""
@@ -164,18 +167,15 @@ class Annas:
         results = scrape_search_results(normalized, limit=capped_limit)
         return results
 
-    def search_catalog(self, query: str, limit: int = 20) -> List[str]:
+    def search_catalog(self, query: str, limit: int = 20) -> List[SearchResult]:
         """Search the live Anna's Archive catalog and return structured results.
 
         The query is stripped and validated before iterating through up to twenty
         result pages (Anna's Archive paginates search responses). Each unique md5
         hash is wrapped in a `SearchResult` model to ensure URL integrity and capture
         the published metadata (language, format, size, provenance).
-
-        Returns JSONL array of `SearchResult` objects.
         """
-        res = self._search_catalog(query, limit=limit)
-        return [r.model_dump_json(exclude_unset=True) for r in res]
+        return self._search_catalog(query, limit=limit)
 
     def download(self, md5: str, collection: Optional[str] = None) -> Path:
         """Download a file by md5, normalize artifacts, and optionally ingest chunks.
@@ -395,66 +395,51 @@ class Annas:
 
     def _elements_to_markdown(self, elements: Sequence[ElementLike]) -> str:
         lines: List[str] = []
-        list_buffer: List[str] = []
         last_page: Optional[int] = None
 
-        def flush_list() -> None:
-            if list_buffer:
-                lines.extend(list_buffer)
-                list_buffer.clear()
-                lines.append("")
-
-        for element in elements:
-            # Research (2025-09-28): unstructured Elements expose `.text`, `.category`, and
-            # `.metadata` (ElementMetadata) attributes deterministically. Docs:
-            # https://docs.unstructured.io/open-source/how-to/get-elements
-            text = element.text
-            if not text or not text.strip():
+        for raw_element in elements:
+            raw_text = getattr(raw_element, "text", "")
+            if not raw_text or not str(raw_text).strip():
                 continue
-            category = element.category.lower()
-            metadata = element.metadata
+
+            metadata = raw_element.metadata
             assert isinstance(
                 metadata, ElementMetadata
             ), "element.metadata must be ElementMetadata"
+
             page = metadata.page_number
             if page is not None and page != last_page:
-                flush_list()
                 lines.append(f"<!-- page {page} -->")
                 lines.append("")
                 last_page = page
 
-            stripped = text.strip()
-            if category == "title":
-                flush_list()
-                # Research (2025-09-28): `category_depth` encodes heading hierarchy; see
-                # https://docs.unstructured.io/platform/document-elements
-                depth = metadata.category_depth
-                if depth is None:
-                    # FIXME(2025-09-28): Some partitioners omit `category_depth` when the
-                    # source lacks hierarchy (same doc as above). Default to level 1 but
-                    # consider deriving depth from element order.
-                    depth = 1
+            category = getattr(raw_element, "category", "").lower()
+            element = cast(Element, raw_element)
+            # Research (2025-10-11): `element_to_md` mirrors the staging helpers exercised in
+            # `test_unstructured/staging/test_base.py::test_element_to_md_conversion`, letting us
+            # lean on unstructured's markdown serialization instead of maintaining bespoke logic
+            # for tables, images, and other element variants.
+            if category == "title" or isinstance(element, Title):
+                depth = metadata.category_depth or 1
                 depth = max(1, min(int(depth), 6))
-                lines.append(f"{'#' * depth} {stripped}")
-                lines.append("")
+                heading = str(raw_text).strip()
+                if heading:
+                    lines.append(f"{'#' * depth} {heading}")
+                    lines.append("")
                 continue
 
-            if category in {"list_item", "listitem"}:
-                list_buffer.append(f"- {stripped}")
-                continue
-
-            flush_list()
-            if category in {"table", "figure"}:
-                # Research (2025-09-28): Table metadata exposes `text_as_html`; see
-                # https://docs.unstructured.io/platform/document-elements#table-specific-metadata
-                html_text = metadata.text_as_html
-                assert html_text is not None, "Table elements require HTML text"
-                lines.append(html_text)
+            rendered: str
+            if isinstance(element, Element):
+                rendered = element_to_md(element).strip()
             else:
-                lines.append(stripped)
+                rendered = str(raw_text).strip()
+            if not rendered:
+                continue
+            if (category in {"list_item", "listitem"} or isinstance(element, ListItem)) and not rendered.startswith("- "):
+                rendered = f"- {rendered}"
+            lines.append(rendered)
             lines.append("")
 
-        flush_list()
         while lines and lines[-1] == "":
             lines.pop()
         lines.append("")
@@ -473,9 +458,12 @@ class Annas:
         ids = existing["ids"]
         if ids:
             coll.delete(ids=ids)
-        # Research (2025-09-28): Element metadata always available as ElementMetadata with
-        # optional page_number/title attributes; see https://docs.unstructured.io/platform/document-elements
-        page_numbers = set()
+
+        typed_elements = [cast(Element, element) for element in elements]
+        if not typed_elements:
+            return
+
+        document_page_numbers: set[int] = set()
         raw_title = document_metadata.title if document_metadata else None
         doc_title = raw_title.strip() if isinstance(raw_title, str) else ""
         raw_author = document_metadata.author if document_metadata else None
@@ -484,55 +472,61 @@ class Annas:
         tag_segments = list(raw_extras)
         raw_format = document_metadata.format if document_metadata else ""
         format_label = raw_format.strip().upper() if isinstance(raw_format, str) else ""
+        fallback_suffix = (raw_format or "bin").strip().lower() or "bin"
+        filename_value = (
+            document_metadata.filename
+            if document_metadata and isinstance(document_metadata.filename, str)
+            else f"{md5}.{fallback_suffix}"
+        )
         size_value = document_metadata.size_bytes if document_metadata else None
         size_bytes = size_value if isinstance(size_value, int) else None
         title = doc_title
         title_found = False
-        for element in elements:
-            element_metadata = element.metadata
-            assert isinstance(
-                element_metadata, ElementMetadata
-            ), "element.metadata must be ElementMetadata"
-            if element_metadata.page_number is not None:
-                page_numbers.add(element_metadata.page_number)
-            if (
-                not title_found
-                and element.category.lower() == "title"
-                and element.text.strip()
-            ):
+        for element in typed_elements:
+            metadata = element.metadata
+            assert isinstance(metadata, ElementMetadata), "element.metadata must be ElementMetadata"
+            if metadata.page_number is not None:
+                document_page_numbers.add(metadata.page_number)
+            if not title_found and isinstance(element, Title) and element.text.strip():
                 candidate = element.text.strip()
-                if not self._is_generic_heading(
-                    candidate
-                ) and not self._looks_like_chapter(candidate):
+                if not self._is_generic_heading(candidate) and not self._looks_like_chapter(candidate):
                     title = candidate
                     title_found = True
-        # Research (2025-09-28): Chroma recall improves with consistent chunk sizes/overlaps; see
-        # https://research.trychroma.com/evaluating-chunking
-        # Research (2025-09-28): RecursiveCharacterTextSplitter preserves structure for generic text;
-        # see https://python.langchain.com/docs/how_to/recursive_text_splitter/
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1200,
-            chunk_overlap=200,
-            length_function=len,
-            separators=["\n\n", "\n", " "],
+
+        # Research (2025-10-11): `chunk_elements` mirrors the behaviors covered in
+        # `test_unstructured/chunking/test_basic.py`, giving us overlap-aware text windows without
+        # hand-rolled splitters.
+        chunks = chunk_elements(
+            typed_elements,
+            include_orig_elements=True,
+            max_characters=1200,
+            overlap=200,
         )
-        raw_chunks = splitter.split_text(text)
-        assert raw_chunks, "No ingestable chunks produced for Chroma ingestion"
+        assert chunks, "No ingestable chunks produced for Chroma ingestion"
 
         documents: List[str] = []
         metadatas: List[Dict[str, str]] = []
-        for index, chunk in enumerate(raw_chunks, start=1):
-            page_matches = [
-                int(match) for match in re.findall(r"<!-- page (\d+) -->", chunk)
-            ]
-            clean_chunk = re.sub(r"<!-- page \d+ -->\s*", "", chunk).strip()
-            if not clean_chunk:
+        for chunk in chunks:
+            chunk_text = chunk.text.strip()
+            if not chunk_text:
                 continue
-            documents.append(clean_chunk)
+
+            orig_elements = list(chunk.metadata.orig_elements or [])
+            chunk_pages = {
+                el.metadata.page_number
+                for el in orig_elements
+                if getattr(el, "metadata", None) is not None
+                and isinstance(el.metadata, ElementMetadata)
+                and el.metadata.page_number is not None
+            }
+
+            chunk_index = len(documents) + 1
+            documents.append(chunk_text)
             chunk_metadata: Dict[str, str] = {
                 "md5": md5,
-                "chunk_index": str(index),
+                "chunk_index": f"{chunk_index}",
                 "title": title or doc_title or "Untitled",
+                "filename": filename_value,
             }
             if author_name:
                 chunk_metadata["author"] = author_name
@@ -542,19 +536,30 @@ class Annas:
                 chunk_metadata["format"] = format_label
             if isinstance(size_bytes, int):
                 chunk_metadata["size_bytes"] = str(size_bytes)
-            if page_matches:
-                first = min(page_matches)
-                last = max(page_matches)
-                chunk_metadata["page_start"] = str(first)
-                chunk_metadata["page_end"] = str(last)
-            if page_numbers:
-                chunk_metadata["pages_total"] = str(len(page_numbers))
-            chapter = self._extract_chapter(clean_chunk)
+            if chunk_pages:
+                chunk_metadata["page_start"] = str(min(chunk_pages))
+                chunk_metadata["page_end"] = str(max(chunk_pages))
+            if document_page_numbers:
+                chunk_metadata["pages_total"] = str(len(document_page_numbers))
+
+            chapter = next(
+                (
+                    el.text.strip()
+                    for el in orig_elements
+                    if isinstance(el, Title)
+                    and el.text.strip()
+                    and not self._is_generic_heading(el.text)
+                ),
+                None,
+            )
+            if not chapter:
+                chapter = self._extract_chapter(chunk_text)
             if chapter and chapter.lower() != chunk_metadata["title"].lower():
                 chunk_metadata["chapter"] = chapter
+
             metadatas.append(chunk_metadata)
 
-        assert documents, "All ingestable chunks were empty after cleaning page markers"
+        assert documents, "All ingestable chunks were empty after processing"
         chunk_ids = [f"{md5}:{index:04d}" for index in range(1, len(documents) + 1)]
         coll.upsert(
             ids=chunk_ids,
@@ -595,9 +600,19 @@ class Annas:
                 tmp_file = Path(tempdir) / name
                 logger.info(f"Extracted {target_file.name} => {tmp_file.name}")
                 assert tmp_file.exists(), f"Extracted file missing: {tmp_file}"
-                sanitized_name = self._sanitize_filename(name, md5)
-                converted_path = target_file.with_name(sanitized_name)
+                extracted_suffix = tmp_file.suffix or ".html"
+                converted_path = target_file.with_suffix(extracted_suffix)
+                if converted_path.exists():
+                    converted_path.unlink()
                 shutil.move(str(tmp_file), str(converted_path))
+                # Preserve associated assets if the extractor produced directories.
+                for item in Path(tempdir).iterdir():
+                    if item == tmp_file or not item.exists():
+                        continue
+                    destination = converted_path.parent / item.name
+                    if destination.exists():
+                        continue
+                    shutil.move(str(item), str(destination))
                 target_file.unlink(missing_ok=True)
                 target_file = converted_path
             except Exception as exc:  # pylint: disable=broad-except
@@ -731,6 +746,8 @@ class Annas:
                 continue
             if ANNA_BRAND_PATTERN.search(segment):
                 continue
+            if segment.strip().lower() in {"null", "unknown", "n/a", "na"}:
+                continue
             cleaned.append(segment)
         return cleaned
 
@@ -761,34 +778,18 @@ class Annas:
     @staticmethod
     def _detect_extension(path: Path) -> Optional[str]:
         try:
-            with path.open("rb") as fh:
-                header = fh.read(4096)
-        except FileNotFoundError:
-            return None
-        if header.startswith(b"%PDF"):
-            return "pdf"
-        if header.startswith(b"PK\x03\x04"):
-            try:
-                import zipfile
+            file_type = detect_filetype(path)
+        except Exception:  # pylint: disable=broad-except
+            file_type = None
 
-                with zipfile.ZipFile(path) as zf:
-                    if "mimetype" in zf.namelist():
-                        mime = zf.read("mimetype").decode("utf-8", "ignore").strip()
-                        if mime == "application/epub+zip":
-                            return "epub"
-                    if any(name.endswith(".rels") for name in zf.namelist()):
-                        return "docx"
-            except Exception:  # pylint: disable=broad-except
-                return "zip"
-            return "zip"
-        if b"BOOKMOBI" in header[:4096]:
-            return "mobi"
-        if header.startswith(b"\x7fELF"):
-            return "bin"
-        if header[:4] == b"Rar!":
-            return "rar"
-        if header[:2] == b"PK":
-            return "zip"
+        if file_type is not None:
+            # Research (2025-10-11): `detect_filetype` is validated across archive/media variants
+            # in `test_unstructured/file_utils/test_filetype.py`; using its canonical extension
+            # avoids our bespoke header sniffing.
+            primary_ext = next(iter(getattr(file_type, "_extensions", [])), None)
+            if primary_ext:
+                return primary_ext.lstrip(".").lower()
+
         suffix = path.suffix.lower().lstrip(".")
         return suffix or None
 
@@ -807,6 +808,7 @@ class Annas:
             return DocumentMetadata(
                 author=None,
                 title=path.stem,
+                filename=path.name,
                 extras=[],
                 format=format_label,
                 size_bytes=size_bytes,
@@ -821,6 +823,7 @@ class Annas:
         return DocumentMetadata(
             author=normalized_author,
             title=normalized_title,
+            filename=path.name,
             extras=normalized_extras,
             format=format_label,
             size_bytes=size_bytes,
@@ -845,6 +848,15 @@ class Annas:
             "preface",
             "foreword",
             "introduction",
+            "copyright",
+            "copyright notice",
+            "all rights reserved",
+            "license",
+            "project gutenberg",
+            "cover",
+            "title page",
+            "credits",
+            "about this ebook",
         }
         return lowered in generics
 
