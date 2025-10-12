@@ -2,40 +2,19 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from types import SimpleNamespace
-from typing import List, cast
 
 import pytest
-from unstructured.documents.elements import ElementMetadata
+from unstructured.documents.elements import Element, ElementMetadata, ListItem, Title, Text
 
-from annas.cli import Annas, ElementLike
-
-
-def _metadata(
-    *,
-    page: int | None = None,
-    depth: int | None = None,
-    html: str | None = None,
-) -> ElementMetadata:
-    meta = ElementMetadata(page_number=page)
-    if depth is not None:
-        meta.category_depth = depth
-    if html is not None:
-        meta.text_as_html = html
-    return meta
+from annas.cli import Annas, DocumentMetadata
 
 
-@pytest.fixture()
-def workdir(tmp_path: Path) -> Path:
-    return tmp_path
-
-
-def test_download_artifact_real_download_when_secret_key_present(workdir: Path) -> None:
+def test_download_artifact_real_download_when_secret_key_present(tmp_path: Path) -> None:
     secret = os.environ.get("ANNAS_SECRET_KEY")
     if not secret:
         pytest.skip("ANNAS_SECRET_KEY not configured; skipping live download test")
 
-    annas = Annas(work_path=workdir, secret_key=secret)
+    annas = Annas(work_path=tmp_path, secret_key=secret)
     preferred_formats = {"epub", "mobi", "azw", "azw3", "txt", "html"}
     results = annas.search_catalog("plato", limit=60)
     assert results, "Expected non-empty search results"
@@ -55,10 +34,10 @@ def test_download_artifact_real_download_when_secret_key_present(workdir: Path) 
     assert download_path.exists()
 
 
-def test_search_downloaded_text_reads_markdown_context(workdir: Path) -> None:
-    annas = Annas(work_path=workdir)
+def test_search_downloaded_text_reads_markdown_context(annas_tmp: Annas) -> None:
+    annas = annas_tmp
     md5 = "a" * 32
-    markdown_dir = workdir / md5
+    markdown_dir = annas.work_path / md5
     markdown_dir.mkdir(parents=True)
     markdown_path = markdown_dir / "sample.md"
     markdown_path.write_text("line1\nmatch here\nline3\nline4\n", encoding="utf-8")
@@ -68,40 +47,42 @@ def test_search_downloaded_text_reads_markdown_context(workdir: Path) -> None:
     assert "line3" in snippet
 
 
-def test_sanitize_filename_truncates_and_preserves_extension(workdir: Path) -> None:
-    annas = Annas(work_path=workdir)
+def test_sanitize_filename_truncates_and_preserves_extension(annas_tmp: Annas) -> None:
+    annas = annas_tmp
     long_name = "very long " * 40 + ".pdf"
     safe = annas._sanitize_filename(long_name, "a" * 32)
     assert len(safe) <= 120
     assert safe.endswith(".pdf")
 
 
-def test_elements_to_markdown_formats_titles_and_lists(workdir: Path) -> None:
-    annas = Annas(work_path=workdir)
-    elements = cast(
-        List[ElementLike],
-        [
-        SimpleNamespace(
-            text="Introduction", category="Title", metadata=_metadata(page=1, depth=1)
+def test_elements_to_markdown_formats_titles_and_lists(annas_tmp: Annas) -> None:
+    annas = annas_tmp
+    elements: list[Element] = [
+        Title(
+            "Introduction",
+            metadata=ElementMetadata(page_number=1, category_depth=1),
         ),
-        SimpleNamespace(
-            text="Item one", category="ListItem", metadata=_metadata(page=1)
+        ListItem(
+            "Item one",
+            metadata=ElementMetadata(page_number=1),
         ),
-        SimpleNamespace(
-            text="Item two", category="ListItem", metadata=_metadata(page=1)
+        ListItem(
+            "Item two",
+            metadata=ElementMetadata(page_number=1),
         ),
-        SimpleNamespace(
-            text="More info", category="NarrativeText", metadata=_metadata(page=1)
+        Text(
+            "More info",
+            metadata=ElementMetadata(page_number=1),
         ),
-        SimpleNamespace(
-            text="Next Section", category="Title", metadata=_metadata(page=2, depth=2)
+        Title(
+            "Next Section",
+            metadata=ElementMetadata(page_number=2, category_depth=2),
         ),
-        SimpleNamespace(
-            text="Final text", category="NarrativeText", metadata=_metadata(page=2)
+        Text(
+            "Final text",
+            metadata=ElementMetadata(page_number=2),
         ),
-        ],
-    )
-
+    ]
     markdown = annas._elements_to_markdown(elements)
     assert "# Introduction" in markdown
     assert "- Item one" in markdown
@@ -109,25 +90,32 @@ def test_elements_to_markdown_formats_titles_and_lists(workdir: Path) -> None:
     assert "<!-- page 2 -->" in markdown
 
 
-def test_chromadb_ingest_and_query(workdir: Path) -> None:
+def test_chromadb_ingest_and_query(annas_tmp: Annas) -> None:
     pytest.importorskip("chromadb")
-    annas = Annas(work_path=workdir)
+    annas = annas_tmp
     collection = "test-chroma"
     md5 = "a" * 32
-    elements = cast(
-        List[ElementLike],
-        [
-        SimpleNamespace(
-            text="Intro section", category="Title", metadata=_metadata(page=1, depth=1)
+    elements: list[Element] = [
+        Title(
+            "COPYRIGHT",
+            metadata=ElementMetadata(page_number=1, category_depth=1),
         ),
-        SimpleNamespace(
-            text="Content line", category="NarrativeText", metadata=_metadata(page=1)
+        Text(
+            "Content line",
+            metadata=ElementMetadata(page_number=1),
         ),
-        ],
-    )
+    ]
     text = annas._elements_to_markdown(elements)
-    annas._load_elements(md5, elements, collection, text)
-    annas._load_elements(md5, elements, collection, text)
+    document_metadata = DocumentMetadata(
+        author="Test Author",
+        title="Sample Book",
+        filename="test_author__sample_book.epub",
+        extras=["Tag One", "Tag Two"],
+        format="epub",
+        size_bytes=1024,
+    )
+    annas._load_elements(md5, elements, collection, text, document_metadata)
+    annas._load_elements(md5, elements, collection, text, document_metadata)
     stored = annas._collection(collection).get(where={"md5": md5})
     ids = stored["ids"]
     assert ids and all(identifier.startswith(f"{md5}:") for identifier in ids)
@@ -137,6 +125,47 @@ def test_chromadb_ingest_and_query(workdir: Path) -> None:
     assert metadatas is not None
     metadata = metadatas[0]
     assert metadata["md5"] == md5
-    assert metadata["filename"].startswith(md5)
-    results = annas.query_collection(collection, "Intro", 1)
-    assert results and "Intro" in results[0]
+    assert metadata["filename"] == document_metadata.filename
+    assert metadata["title"] == document_metadata.title
+    assert metadata["author"] == document_metadata.author
+    assert metadata["tags"] == "Tag One|Tag Two"
+    results = annas.query_collection(collection, "Content", 1)
+    assert results and "Content" in results[0]
+
+
+@pytest.mark.parametrize(
+    ("heading", "expected"),
+    [
+        ("Chapter 3 – Methods", True),
+        ("CHAP. IX.", True),
+        ("1. Background", True),
+        ("3) Appendix", True),
+        ("Section IV", True),
+        ("Foreword", False),
+        ("Appendix", False),
+    ],
+)
+def test_looks_like_chapter_uses_upstream_patterns(heading: str, expected: bool) -> None:
+    assert Annas._looks_like_chapter(heading) is expected
+
+
+def test_detect_extension_falls_back_to_suffix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "sample.custom"
+    path.write_bytes(b"hello world")
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("libmagic missing")
+
+    monkeypatch.setattr("annas.cli.detect_filetype", _raise)
+    assert Annas._detect_extension(path) == "custom"
+
+
+def test_document_metadata_from_path_parses_segments(tmp_path: Path) -> None:
+    path = tmp_path / "author__title__extra-info.epub"
+    path.write_bytes(b"data")
+    annas = Annas(work_path=tmp_path)
+    metadata = annas._document_metadata_from_path(path)
+    assert metadata.author == "Author"
+    assert metadata.title == "Title"
+    assert metadata.extras == ["Extra-Info"]
+    assert metadata.format == "epub"

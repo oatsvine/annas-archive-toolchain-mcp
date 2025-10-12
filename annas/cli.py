@@ -35,6 +35,7 @@ from unstructured.documents.elements import Element, ElementMetadata, ListItem, 
 from unstructured.file_utils.filetype import detect_filetype
 from unstructured.partition.auto import partition
 from unstructured.staging.base import element_to_md
+from unstructured.nlp.patterns import ENUMERATED_BULLETS_RE, NUMBERED_LIST_RE
 
 # from unstructured.metrics.evaluate import evaluate_extraction
 
@@ -251,7 +252,14 @@ class Annas:
         assert detected_extension is not None, "Unable to detect downloaded file format"
         document_metadata = self._document_metadata_from_path(download_path)
         strategy = "hi_res" if download_path.suffix.lower() == ".pdf" else "fast"
-        elements = partition(filename=str(download_path), strategy=strategy)
+        # Research (2025-10-11): Passing `metadata_filename` mirrors the coverage in
+        # `test_unstructured/partition/common/test_metadata.py::it_uses_metadata_filename_arg_value_when_present`,
+        # ensuring downstream chunk metadata retains the sanitized filename without extra plumbing.
+        elements = partition(
+            filename=str(download_path),
+            strategy=strategy,
+            metadata_filename=document_metadata.filename,
+        )
         markdown = self._elements_to_markdown(elements)
         markdown_path = self._markdown_path_for_md5(md5)
         markdown_path.write_text(markdown, encoding="utf-8")
@@ -265,6 +273,10 @@ class Annas:
             )
         logger.info("Download complete", md5=md5, path=str(download_path))
         return download_path
+
+    def download_artifact(self, md5: str, collection: Optional[str] = None) -> Path:
+        # NOTE(compat): Retain the legacy method name used by MCP tooling and tests.
+        return self.download(md5, collection=collection)
 
     def search_downloaded_text(
         self, md5: str, needle: str, before: int = 2, after: int = 2, limit: int = 3
@@ -778,7 +790,7 @@ class Annas:
     @staticmethod
     def _detect_extension(path: Path) -> Optional[str]:
         try:
-            file_type = detect_filetype(path)
+            file_type = detect_filetype(str(path))
         except Exception:  # pylint: disable=broad-except
             file_type = None
 
@@ -862,8 +874,21 @@ class Annas:
 
     @staticmethod
     def _looks_like_chapter(value: str) -> bool:
-        lowered = value.strip().lower()
-        return bool(re.match(r"chapter\s+\d+", lowered))
+        stripped = value.strip()
+        if not stripped:
+            return False
+        lowered = stripped.lower()
+        if lowered.startswith(("chapter", "chap.")):
+            return True
+        # Research (2025-10-11): `ENUMERATED_BULLETS_RE` and `NUMBERED_LIST_RE` are the same
+        # markers the core partitioners rely on for section detection (see
+        # `unstructured/partition/common/common.py`), so piggybacking on them keeps our heuristics
+        # aligned with upstream chapter parsing.
+        if NUMBERED_LIST_RE.match(stripped):
+            return True
+        if ENUMERATED_BULLETS_RE.match(stripped):
+            return True
+        return bool(re.match(r"(?i)(?:book|part|section)\s+[ivxlcdm\d]+", stripped))
 
     def _markdown_path_for_md5(self, md5: str) -> Path:
         target_dir = self._artifact_dir(md5)
