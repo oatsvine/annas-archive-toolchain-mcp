@@ -44,7 +44,6 @@ dev = [
   "langchain-mcp-adapters",
 ]
 
-# TODO: Moved tts to projects/. Spin off this file into projects/cue-script-tts
 [tool.setuptools]
 packages = ["annas", "tests"]
 

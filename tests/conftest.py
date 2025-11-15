@@ -25,6 +25,14 @@ def corpus_paths(corpus_root: Path) -> Dict[str, List[Path]]:
 
 
 @pytest.fixture(scope="session")
+def corpus_files(corpus_paths: Dict[str, List[Path]]) -> List[Path]:
+    files: List[Path] = []
+    for bucket in corpus_paths.values():
+        files.extend(bucket)
+    return sorted(files)
+
+
+@pytest.fixture(scope="session")
 def partition_elements() -> Callable[[Path], List["Element"]]:
     from unstructured.partition.auto import partition
 

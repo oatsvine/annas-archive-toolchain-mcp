@@ -178,14 +178,34 @@ class Annas:
         """
         return self._search_catalog(query, limit=limit)
 
-    def download(self, md5: str, collection: Optional[str] = None) -> Path:
+    def download(
+        self,
+        md5: str,
+        collection: Optional[str] = None,
+        *,
+        ocr_limit: Optional[float] = None,
+    ) -> Path:
         """Download a file by md5, normalize artifacts, and optionally ingest chunks.
 
         The method validates the md5, invokes the fast download endpoint with the
         configured secret key, streams the payload into the work directory, and
         extracts auxiliary markdown. When `collection` is provided, the derived
         markdown is chunked and upserted into the named Chroma collection.
+
+        Parameters
+        ----------
+        md5:
+            Anna's Archive identifier for the artifact.
+        collection:
+            Optional Chroma collection name for ingestion.
+        ocr_limit:
+            Optional float between 0.0 and 1.0 bounding how much of a PDF's text can
+            originate from OCR before aborting the download. This guards against
+            image-only scans that produce poor downstream quality.
         """
+
+        if ocr_limit is not None:
+            assert 0.0 <= ocr_limit <= 1.0, "ocr_limit must be between 0.0 and 1.0"
 
         md5 = self._validate_md5(md5)
         assert (
@@ -260,6 +280,24 @@ class Annas:
             strategy=strategy,
             metadata_filename=document_metadata.filename,
         )
+
+        if strategy == "hi_res" and ocr_limit is not None:
+            ocr_ratio = self._compute_pdf_ocr_ratio(
+                download_path,
+                document_metadata.filename,
+                elements,
+            )
+            if ocr_ratio is not None and ocr_ratio > ocr_limit:
+                raise ArtifactValidationError(
+                    (
+                        "PDF relies on OCR for {:.1%} of extracted text, exceeding limit {:.1%}"
+                    ).format(ocr_ratio, ocr_limit)
+                )
+            logger.debug(
+                "Computed OCR ratio {:.3f} for {filename}",
+                ocr_ratio or 0.0,
+                filename=document_metadata.filename,
+            )
         markdown = self._elements_to_markdown(elements)
         markdown_path = self._markdown_path_for_md5(md5)
         markdown_path.write_text(markdown, encoding="utf-8")
@@ -273,6 +311,48 @@ class Annas:
             )
         logger.info("Download complete", md5=md5, path=str(download_path))
         return download_path
+
+    @staticmethod
+    def _count_text_characters(elements: Sequence[ElementLike]) -> int:
+        total = 0
+        for element in elements:
+            text = getattr(element, "text", "")
+            if not text:
+                continue
+            stripped = str(text).strip()
+            if stripped:
+                total += len(stripped)
+        return total
+
+    def _compute_pdf_ocr_ratio(
+        self,
+        path: Path,
+        metadata_filename: str,
+        hi_res_elements: Sequence[ElementLike],
+    ) -> Optional[float]:
+        if path.suffix.lower() != ".pdf":
+            return None
+
+        hi_chars = self._count_text_characters(hi_res_elements)
+        if hi_chars <= 0:
+            return 1.0
+
+        try:
+            fast_elements = partition(
+                filename=str(path),
+                strategy="fast",
+                metadata_filename=metadata_filename,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Unable to compute fast-text baseline: {}", exc)
+            return 1.0
+
+        fast_chars = self._count_text_characters(cast(Sequence[ElementLike], fast_elements))
+        if fast_chars <= 0:
+            return 1.0
+        if fast_chars >= hi_chars:
+            return 0.0
+        return (hi_chars - fast_chars) / hi_chars
 
     def download_artifact(self, md5: str, collection: Optional[str] = None) -> Path:
         # NOTE(compat): Retain the legacy method name used by MCP tooling and tests.
