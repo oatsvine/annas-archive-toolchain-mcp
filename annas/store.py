@@ -9,7 +9,8 @@ import chromadb
 import typer
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
-from chromadb.api.types import Metadata, QueryResult, Where
+from chromadb.api.types import GetResult, Metadata, QueryResult, Where
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from unstructured.chunking.basic import chunk_elements
 from unstructured.documents.elements import Element, ElementMetadata, ListItem, Title
@@ -90,6 +91,7 @@ def get_or_create_chroma(
 
     if client is not None:
         return client
+    logger.debug("Opening Chroma client at {}", work_dir / "chroma")
     return chromadb.PersistentClient(path=str(work_dir / "chroma"))
 
 
@@ -104,7 +106,7 @@ def _metadata(
     collection_name: str,
     n: int,
     md5_filter: Optional[Where],
-) -> QueryResult:
+) -> GetResult:
     """Small helper so tests can inject a client and bypass CLI plumbing when querying.
 
     Uses `get` (not `query`) so it works without query texts/embeddings and stays stable in
@@ -112,6 +114,12 @@ def _metadata(
     """
 
     collection = _collection(client, collection_name)
+    logger.debug(
+        "Fetching metadata where={} limit={} from collection {}",
+        md5_filter,
+        n,
+        collection_name,
+    )
     return collection.get(
         where=md5_filter, limit=n, include=["documents", "metadatas"]
     )
@@ -153,16 +161,13 @@ def metadata(
         if md5_list:
             md5_filter = cast(Where, {"md5": {"$in": md5_list}})
     query_result = _metadata(client, collection_name, n, md5_filter)
-    docs = query_result["documents"]
-    assert docs is not None, "Chroma query must return documents"
-    assert docs, "Chroma query returned no document rows"
-    metadatas = query_result["metadatas"]
-    primary_docs: List[str] = docs[0]
-    assert metadatas and len(metadatas[0]) == len(
-        primary_docs
-    ), "Metadata count mismatch"
-    assert primary_docs, "Chroma query returned empty document set"
-    assembled = [json.dumps(metadatas[0][i] or {}) for i, _ in enumerate(primary_docs)]
+    docs = query_result["documents"] or []
+    metadatas = query_result["metadatas"] or []
+    assert len(docs) == len(metadatas), "Metadata count mismatch"
+    if not docs:
+        typer.echo("")
+        return []
+    assembled = [json.dumps(meta or {}) for meta in metadatas]
     typer.echo("\n".join(assembled))
     return assembled
 
@@ -198,6 +203,13 @@ def query_collection(
     assert query.strip(), "query must be non-empty"
     assert n >= 1, "limit must be >= 1"
     client = get_or_create_chroma(work_dir)
+    logger.debug(
+        "Querying collection={} text='{}' n={} filter={}",
+        collection,
+        query,
+        n,
+        md5s,
+    )
     md5_filter: Optional[Where] = None
     if md5s:
         md5_list = [_validate_md5(m) for m in md5s.split(",") if m.strip()]

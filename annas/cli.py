@@ -22,6 +22,10 @@ import requests
 import typer
 from loguru import logger
 from rich.pretty import pretty_repr
+from rich.console import Console
+from rich.table import Table
+from rich import box
+from rich.text import Text
 from unstructured.documents.elements import Element, ElementMetadata, ListItem, Title
 from unstructured.file_utils.filetype import detect_filetype
 from unstructured.partition.auto import partition
@@ -84,7 +88,40 @@ def search_catalog(
 
     capped_limit = min(limit, 200)
     results = scrape_search_results(normalized, limit=capped_limit)
-    typer.echo(pretty_repr(results))
+    console = Console()
+    table = Table(
+        title="Search Results",
+        box=box.SIMPLE_HEAVY,
+        show_header=True,
+        header_style="bold cyan",
+        row_styles=["none", "dim"],
+    )
+    table.add_column("Title", overflow="fold", ratio=4)
+    table.add_column("Format / Size", ratio=1)
+    table.add_column("Lang", width=6, justify="center")
+    table.add_column("Year", width=6, justify="center")
+    table.add_column("Category", ratio=2)
+    table.add_column("MD5", width=12)
+
+    for entry in results:
+        size_label = entry.file_size_label or (
+            f"{entry.file_size_bytes/1_048_576:.1f}MB"
+            if entry.file_size_bytes is not None
+            else "?"
+        )
+        fmt_label = entry.file_format or "?"
+        format_size = f"{fmt_label.upper()} / {size_label}"
+        lang = entry.language_code or entry.language or "?"
+        year = str(entry.year) if entry.year is not None else "—"
+        category = entry.category or ""
+        title_text = Text(entry.title or "Untitled", overflow="fold")
+        if entry.url:
+            title_text.stylize(f"link {entry.url}")
+        md5_short = f"{entry.md5[:8]}…"
+        table.add_row(title_text, format_size, lang, year, category, md5_short)
+
+    console.print(table)
+    logger.debug("Rendered {} results", len(results))
     return results
 
 
@@ -134,6 +171,7 @@ def download(
     session = _build_session()
 
     logger.info("Fetching md5={md5}", md5=md5_value)
+    logger.debug("Preparing download target dir {}", work_dir / md5_value)
     last_error: Optional[Exception] = None
     download_path: Optional[Path] = None
     path_candidates: List[Optional[int]] = [None, 1, 2]
@@ -146,6 +184,7 @@ def download(
             if domain_index is not None:
                 params["domain_index"] = str(domain_index)
             try:
+                logger.debug("Requesting fast-download URL path={} domain={} params={} ", path_index, domain_index, params)
                 response = _retrying_get(session, FAST_DOWNLOAD_ENDPOINT, params=params)
             except requests.HTTPError as exc:
                 logger.warning(
@@ -164,6 +203,7 @@ def download(
             )
 
             try:
+                logger.debug("Streaming payload from {}", download_url)
                 download_response = _retrying_get(
                     session,
                     download_url,
@@ -192,6 +232,7 @@ def download(
     detected_extension = _detect_extension(download_path)
     assert detected_extension is not None, "Unable to detect downloaded file format"
     document_metadata = _document_metadata_from_path(download_path)
+    logger.debug("Detected document metadata {}", document_metadata)
     strategy = "hi_res" if download_path.suffix.lower() == ".pdf" else "fast"
     elements = partition(
         filename=str(download_path),
@@ -264,6 +305,7 @@ def search_downloaded_text(
 ) -> str:
     """Return markdown snippets around a needle for an existing md5 artifact."""
 
+    logger.debug("Searching markdown for md5={} in {}", md5, work_dir)
     md5_value = _validate_md5(md5)
     normalized = needle.strip()
     assert normalized, "needle must be non-empty"
@@ -430,6 +472,7 @@ def _artifact_dir(work_dir: Path, md5: str) -> Path:
 def _write_stream(md5: str, response: requests.Response, target_dir: Path) -> Path:
     filename = _filename_from_response(md5, response)
     target_file = target_dir / filename
+    logger.debug("Writing stream to {} (chunked)", target_file)
     logger.info("Writing download to {path}", path=str(target_file))
     with target_file.open("wb") as fh:
         for chunk in response.iter_content(chunk_size=1_048_576):
