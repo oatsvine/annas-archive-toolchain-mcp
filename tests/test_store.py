@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 import pytest
-from annas.state import AnnasState
 from annas.store import (
     DocumentMetadata,
-    _collection,
+    get_or_create_chroma,
     load_elements,
     query_collection,
 )
 from annas.cli import _elements_to_markdown
 from unstructured.documents.elements import Element, ElementMetadata, Text, Title
+from pathlib import Path
 
 
-def test_chromadb_ingest_and_query(annas_tmp: AnnasState) -> None:
+def test_chromadb_ingest_and_query(annas_tmp: Path) -> None:
     pytest.importorskip("chromadb")
-    state = annas_tmp
+    work_dir = annas_tmp
     collection = "test-chroma"
     md5 = "a" * 32
     elements: list[Element] = [
@@ -36,9 +36,10 @@ def test_chromadb_ingest_and_query(annas_tmp: AnnasState) -> None:
         format="epub",
         size_bytes=1024,
     )
-    load_elements(state, md5, elements, collection, text, document_metadata)
-    load_elements(state, md5, elements, collection, text, document_metadata)
-    stored = _collection(state, collection).get(where={"md5": md5})
+    load_elements(work_dir, md5, elements, collection, text, document_metadata)
+    load_elements(work_dir, md5, elements, collection, text, document_metadata)
+    client = get_or_create_chroma(work_dir)
+    stored = client.get_or_create_collection(collection).get(where={"md5": md5})
     ids = stored["ids"]
     assert ids and all(identifier.startswith(f"{md5}:") for identifier in ids)
     # ensure dedupe removed duplicates
@@ -51,5 +52,5 @@ def test_chromadb_ingest_and_query(annas_tmp: AnnasState) -> None:
     assert metadata["title"] == document_metadata.title
     assert metadata["author"] == document_metadata.author
     assert metadata["tags"] == "Tag One|Tag Two"
-    results = query_collection(collection, "Content", 1)
+    results = query_collection(collection, "Content", work_dir=work_dir, n=1, md5s=None)
     assert results and "Content" in results[0]

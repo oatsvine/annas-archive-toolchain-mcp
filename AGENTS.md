@@ -5,6 +5,7 @@
 * Follow existing file/project conventions first. When this doc and code comments conflict, **code comments win**. Your primary responsibility is to **match the current file’s patterns** (naming, logging, returns).
 
 **Core principle:** Challenge every line of code. If a line is not required for correctness, clarity, or measurable performance, **remove it**. Agents tend to over-abstract: resist helper sprawl, avoid “future-proofing,” and keep the API surface minimal.
+**Design lens:** Functional core / imperative shell, explicit dependency injection (Typer `ctx.obj` over globals), and separation of concerns (CLI parsing ≠ business logic ≠ I/O).
 
 ## 1) Project Structure
 
@@ -45,6 +46,8 @@
 - When migrating from `fire`, move `__init__` level arguments to individual command functions requiring these values. Remove class pattern ENTIRELY, use `envvar` for environment mapped argument and define small state dataclass (no dictionary) only if statefullness really needed using composition.
 - Strongly avoid wrapping infernal functions, prefer implementing your logic directly in the command function.
 - Do not wrap commands in thin helpers; put command logic directly in the Typer command functions.
+- Prefer Typer’s `ctx.obj` pattern over module globals: set shared config in the callback, read it in commands, and keep the stored object minimal (only what must be shared for that invocation).
+- Use option callbacks for upfront validation/materialization (e.g., ensuring directories exist) instead of hidden side effects inside command bodies.
 - Reference: Typer tutorial on arguments/options with `Annotated` (`https://typer.tiangolo.com/tutorial/arguments/optional/`).
 
 ## 4) Testing
@@ -79,6 +82,10 @@
 * When data validation is necessary, never create bespoke helpers until you ruled out using pydantic validators.
 * Never configure **Loguru** use default `from loguru import logger` directly.
 * Document why non-obvious choices exist (1–3 lines, not essays).
+* Only introduce wrappers/helpers when they unlock a concrete benefit (testability, composition, or reuse). State that benefit briefly in the helper’s docstring.
+* Prefer functional core / imperative shell: keep side-effect–free logic isolated and push I/O to the edges. Mark side-effect boundaries clearly.
+* Use explicit dependency injection for CLIs (options/envvars + `ctx.obj`) instead of implicit globals; keep `ctx.obj` minimal and per-invocation.
+* Respect the types you already have—don’t re-wrap `Path` objects or recreate resources unnecessarily; lean on idiomatic library APIs directly.
 
 **Don’t**
 
@@ -87,5 +94,5 @@
 * Don't define helpers before your can prove that inlining the code would add significant duplications and more lines of code.
 * Don’t ship untyped functions or untyped public interfaces.
 * Don’t add dead code, speculative hooks, or “future-proofing.”
-
-
+* Don’t stash long-lived state in module globals for Typer CLIs; rely on `ctx.obj` and explicit options/envvars instead.
+* Don’t wrap canonical library APIs unless composition or test seams demand it; avoid helper sprawl.

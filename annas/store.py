@@ -1,29 +1,26 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional, Protocol, Sequence, cast
 
-from annas.common import work_dir_callback
 import chromadb
 import typer
+from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 from chromadb.api.types import Metadata, QueryResult, Where
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from unstructured.chunking.basic import chunk_elements
 from unstructured.documents.elements import Element, ElementMetadata, ListItem, Title
 
-from annas.state import AnnasState, require_state
+from annas.common import work_dir_callback
 
-store_app = typer.Typer(
-    name="store",
-    help="Chroma-backed metadata and query helpers.",
-)
+store_app = typer.Typer(name="store", help="Chroma-backed metadata and query helpers.")
 
 
 class ElementLike(Protocol):
-    """Protocol capturing the subset of Element attributes relied on by helpers."""
+    """Minimal element contract used across ingestion helpers."""
 
     text: str
     category: str
@@ -86,30 +83,45 @@ class DocumentMetadata(BaseModel):
         return value
 
 
-@store_app.callback()
-def store_callback(ctx: Optional[typer.Context] = None) -> None:
-    """Ensure shared state exists before running store subcommands."""
+def get_or_create_chroma(
+    work_dir: Path, client: Optional[ClientAPI] = None
+) -> ClientAPI:
+    """Return a Chroma client rooted in work_dir, allowing test injection of a client."""
 
-    require_state(ctx)
+    if client is not None:
+        return client
+    return chromadb.PersistentClient(path=str(work_dir / "chroma"))
 
 
-# TODO: No WRAPPER you cannot do this.
-# def _collection(state: AnnasState, name: str) -> Collection:
-#     if state.chroma_client is None:
-#         state.chroma_client = chromadb.PersistentClient(
-#             path=str(state.work_path / "chroma")
-#         )
-#     return state.chroma_client.get_or_create_collection(name)
+def _collection(client: ClientAPI, name: str) -> Collection:
+    """Fetch or create the target collection (isolated for reuse in tests)."""
+
+    return client.get_or_create_collection(name)
+
+
+def _metadata(
+    client: ClientAPI,
+    collection_name: str,
+    n: int,
+    md5_filter: Optional[Where],
+) -> QueryResult:
+    """Small helper so tests can inject a client and bypass CLI plumbing when querying.
+
+    Uses `get` (not `query`) so it works without query texts/embeddings and stays stable in
+    tests that only need to fetch stored records.
+    """
+
+    collection = _collection(client, collection_name)
+    return collection.get(
+        where=md5_filter, limit=n, include=["documents", "metadatas"]
+    )
 
 
 @store_app.command()
 def metadata(
     collection_name: Annotated[
-        str,
-        typer.Argument(help="Chroma collection name to inspect"),
+        str, typer.Argument(help="Chroma collection name to inspect")
     ],
-    # NOTE: NEVER mix defaults with envvars. your envvar is required, make it required (simply by not providing a default and not using Optional)
-    # NOTE: Order matters, you must put non-optional options before optional ones
     work_dir: Annotated[
         Path,
         typer.Option(
@@ -123,37 +135,24 @@ def metadata(
         ),
     ],
     n: Annotated[
-        int,
-        typer.Option("--n", min=1, help="Number of documents to return"),
+        int, typer.Option("--n", min=1, help="Number of documents to return")
     ] = 10,
     md5s: Annotated[
         Optional[str],
         typer.Option(
-            "--md5s",
-            help="Comma-separated md5s to filter results",
-            show_default=False,
+            "--md5s", help="Comma-separated md5s to filter results", show_default=False
         ),
     ] = None,
 ) -> List[str]:
     """Return metadata rows from a Chroma collection."""
 
-    # NOTE: THIS IS A CLI. WTF would be the point of sharing the client in a stateful way?
-    client = chromadb.PersistentClient(
-             path=str(work_dir / "chroma")
-         )
+    client = get_or_create_chroma(work_dir)
     md5_filter: Optional[Where] = None
     if md5s:
         md5_list = [_validate_md5(m) for m in md5s.split(",") if m.strip()]
         if md5_list:
             md5_filter = cast(Where, {"md5": {"$in": md5_list}})
-    # TODO: NO WRAPPER, use you canonical chroma client here, goto definition and lookup official docs to use it correctly.   
-    # collection_client = _collection(current, collection_name)
-    collection = client.get_or_create_collection(collection_name) 
-    query_result: QueryResult = collection.query(
-        n_results=n,
-        where=md5_filter,
-        include=["documents", "metadatas"],
-    )
+    query_result = _metadata(client, collection_name, n, md5_filter)
     docs = query_result["documents"]
     assert docs is not None, "Chroma query must return documents"
     assert docs, "Chroma query returned no document rows"
@@ -163,46 +162,48 @@ def metadata(
         primary_docs
     ), "Metadata count mismatch"
     assert primary_docs, "Chroma query returned empty document set"
-    assembled: List[str] = []
-    for i, _doc in enumerate(primary_docs):
-        meta = metadatas[0][i] or {}
-        assembled.append(json.dumps(meta))
+    assembled = [json.dumps(metadatas[0][i] or {}) for i, _ in enumerate(primary_docs)]
     typer.echo("\n".join(assembled))
     return assembled
 
 
 @store_app.command()
 def query_collection(
-    ctx: Optional[typer.Context] = None,
-    collection: Annotated[
-        str,
-        typer.Argument(help="Chroma collection name to query"),
-    ],
+    collection: Annotated[str, typer.Argument(help="Chroma collection name to query")],
     query: Annotated[str, typer.Argument(help="Similarity search text")],
+    work_dir: Annotated[
+        Path,
+        typer.Option(
+            envvar="ANNAS_DOWNLOAD_PATH",
+            exists=False,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=False,
+            callback=work_dir_callback,
+            help="Directory for downloads and derived artifacts",
+        ),
+    ],
     n: Annotated[
-        int,
-        typer.Option("--n", min=1, help="Number of matching chunks to return"),
+        int, typer.Option("--n", min=1, help="Number of matching chunks to return")
     ] = 10,
     md5s: Annotated[
         Optional[str],
         typer.Option(
-            "--md5s",
-            help="Comma-separated md5s to filter results",
-            show_default=False,
+            "--md5s", help="Comma-separated md5s to filter results", show_default=False
         ),
     ] = None,
 ) -> List[str]:
     """Query a Chroma collection and format the best-matching document chunks."""
 
-    current = require_state(ctx)
     assert query.strip(), "query must be non-empty"
     assert n >= 1, "limit must be >= 1"
+    client = get_or_create_chroma(work_dir)
     md5_filter: Optional[Where] = None
     if md5s:
         md5_list = [_validate_md5(m) for m in md5s.split(",") if m.strip()]
         if md5_list:
             md5_filter = cast(Where, {"md5": {"$in": md5_list}})
-    collection_client = _collection(current, collection)
+    collection_client = _collection(client, collection)
 
     query_result: QueryResult = collection_client.query(
         query_texts=[query],
@@ -236,14 +237,16 @@ def query_collection(
 
 
 def load_elements(
-    state: AnnasState,
+    work_dir: Path,
     md5: str,
     elements: Sequence[ElementLike],
     collection: str,
     text: str,
     document_metadata: Optional[DocumentMetadata] = None,
+    client: Optional[ClientAPI] = None,
 ) -> None:
-    coll = _collection(state, collection)
+    client = get_or_create_chroma(work_dir, client)
+    coll = _collection(client, collection)
     existing = coll.get(where={"md5": md5})
     ids = existing["ids"]
     if ids:
@@ -281,7 +284,9 @@ def load_elements(
             document_page_numbers.add(metadata.page_number)
         if not title_found and isinstance(element, Title) and element.text.strip():
             candidate = element.text.strip()
-            if not _is_generic_heading(candidate) and not _looks_like_chapter(candidate):
+            if not _is_generic_heading(candidate) and not _looks_like_chapter(
+                candidate
+            ):
                 title = candidate
                 title_found = True
 
@@ -351,9 +356,7 @@ def load_elements(
     assert documents, "All ingestable chunks were empty after processing"
     chunk_ids = [f"{md5}:{index:04d}" for index in range(1, len(documents) + 1)]
     coll.upsert(
-        ids=chunk_ids,
-        documents=documents,
-        metadatas=cast(List[Metadata], metadatas),
+        ids=chunk_ids, documents=documents, metadatas=cast(List[Metadata], metadatas)
     )
 
 

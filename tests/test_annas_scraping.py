@@ -7,12 +7,12 @@ from typing import Iterable, List, Optional
 
 import pytest
 
-from annas.state import configure_state
 from annas.cli import download
 from annas.scrape import ANNAS_BASE_URL, SearchResult, scrape_search_results
 
 
 def _collect_live_results(query: str, limit: int) -> List[SearchResult]:
+    results: List[SearchResult] = []
     try:
         results = scrape_search_results(query, limit=limit)
     except Exception as exc:  # pragma: no cover - network flake protection
@@ -58,7 +58,9 @@ def test_scrape_search_results_invariants() -> None:
     urls = [entry.url for entry in results]
 
     assert len(md5s) == len(set(md5s)), "Duplicate md5s detected"
-    assert len(titles) == len(set(title.casefold() for title in titles)), "Duplicate titles detected"
+    assert len(titles) == len(
+        set(title.casefold() for title in titles)
+    ), "Duplicate titles detected"
     assert len(urls) == len(set(urls)), "Duplicate URLs detected"
 
     _assert_metadata_richness(results)
@@ -93,6 +95,7 @@ def test_scraped_metadata_matches_download(tmp_path: Path) -> None:
     secret = os.environ.get("ANNAS_SECRET_KEY")
     if not secret:
         pytest.skip("ANNAS_SECRET_KEY not configured; skipping download verification")
+    assert secret is not None
 
     preferred_formats = {"epub", "fb2", "djvu", "doc", "docx", "txt"}
     conversion_formats = {"mobi", "azw", "azw3"}
@@ -134,10 +137,13 @@ def test_scraped_metadata_matches_download(tmp_path: Path) -> None:
         candidate_requires_conversion = True
 
     if candidate is None:
-        pytest.skip("No suitable search result with metadata available for download comparison")
+        pytest.skip(
+            "No suitable search result with metadata available for download comparison"
+        )
+    assert candidate is not None
 
-    configure_state(tmp_path / "annas", secret)
-    download_path = download(candidate.md5)
+    work_dir = tmp_path / "annas"
+    download_path = download(candidate.md5, work_dir=work_dir, secret_key=secret)
     assert download_path.exists(), "Expected downloaded artifact to exist"
 
     actual_size = download_path.stat().st_size

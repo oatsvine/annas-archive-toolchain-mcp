@@ -11,7 +11,6 @@ from annas.cli import (
     _sanitize_filename,
     search_catalog,
 )
-from annas.state import configure_state
 from annas.store import _extract_chapter
 from annas.scrape import ANNAS_BASE_URL, SearchResult
 
@@ -41,14 +40,14 @@ def _synthetic_annas_filename(title: str, author: str, md5: str, extension: str)
 
 def test_search_result_invariants(tmp_path: Path) -> None:
     workdir = tmp_path / "annas"
-    configure_state(workdir, None)
 
+    sample: List[SearchResult] = []
     try:
         sample = search_catalog("plato", limit=100)
     except Exception as exc:  # pragma: no cover - network flake protection
         pytest.skip(f"Search unavailable: {exc!r}")
 
-    if len(sample) < 100:
+    if not sample or len(sample) < 100:
         pytest.skip("Insufficient search results for invariant checks")
 
     md5s = [entry.md5 for entry in sample]

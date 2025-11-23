@@ -16,7 +16,6 @@ from annas.cli import (
     search_catalog,
     search_downloaded_text,
 )
-from annas.state import AnnasState, configure_state
 from annas.store import _looks_like_chapter
 from unstructured.documents.elements import (
     Element,
@@ -40,8 +39,7 @@ def test_download_artifact_real_download_when_secret_key_present(
     secret = os.environ.get("ANNAS_SECRET_KEY")
     if not secret:
         pytest.skip("ANNAS_SECRET_KEY not configured; skipping live download test")
-
-    state = configure_state(tmp_path, secret)
+    assert secret is not None
     preferred_formats = {"epub", "mobi", "azw", "azw3", "txt", "html"}
     results = search_catalog("plato", limit=60)
     assert results, "Expected non-empty search results"
@@ -55,34 +53,35 @@ def test_download_artifact_real_download_when_secret_key_present(
     )
     if candidate is None:
         pytest.skip("No supported search results available for download verification")
+    assert candidate is not None
     md5 = candidate.md5
-    download_path = download(md5)
+    download_path = download(md5, work_dir=tmp_path, secret_key=secret)
     assert download_path.exists()
 
 
-def test_search_downloaded_text_reads_markdown_context(annas_tmp: AnnasState) -> None:
-    state = annas_tmp
+def test_search_downloaded_text_reads_markdown_context(annas_tmp: Path) -> None:
+    work_dir = annas_tmp
     md5 = "a" * 32
-    markdown_dir = state.work_path / md5
+    markdown_dir = work_dir / md5
     markdown_dir.mkdir(parents=True)
     markdown_path = markdown_dir / "sample.md"
     markdown_path.write_text("line1\nmatch here\nline3\nline4\n", encoding="utf-8")
 
-    snippet = search_downloaded_text(md5, "match", before=1, after=1, limit=1)
+    snippet = search_downloaded_text(
+        md5, "match", before=1, after=1, limit=1, work_dir=work_dir
+    )
     assert "line1" in snippet
     assert "line3" in snippet
 
 
-def test_sanitize_filename_truncates_and_preserves_extension(
-    annas_tmp: AnnasState,
-) -> None:
+def test_sanitize_filename_truncates_and_preserves_extension(annas_tmp: Path) -> None:
     long_name = "very long " * 40 + ".pdf"
     safe = _sanitize_filename(long_name, "a" * 32)
     assert len(safe) <= 120
     assert safe.endswith(".pdf")
 
 
-def test_elements_to_markdown_formats_titles_and_lists(annas_tmp: AnnasState) -> None:
+def test_elements_to_markdown_formats_titles_and_lists(annas_tmp: Path) -> None:
     elements: list[Element] = [
         Title(
             "Introduction",

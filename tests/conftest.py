@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Dict, Iterable, List
+from typing import Callable, Dict, Iterable, List
 
 import pytest
 
-if TYPE_CHECKING:
-    from annas.state import AnnasState
-    from unstructured.documents.elements import Element
+from unstructured.documents.elements import Element
 
 
 @pytest.fixture(scope="session")
@@ -43,8 +41,5 @@ def partition_elements() -> Callable[[Path], List["Element"]]:
 
 
 @pytest.fixture()
-def annas_tmp(tmp_path: Path) -> Iterable["AnnasState"]:
-    from annas.state import AnnasState, configure_state
-
-    annas_state = configure_state(tmp_path, None)
-    yield annas_state
+def annas_tmp(tmp_path: Path) -> Iterable[Path]:
+    yield tmp_path

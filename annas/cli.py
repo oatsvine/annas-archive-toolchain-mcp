@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import re
 import shutil
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Dict, List, Optional, Sequence, cast
 from urllib.parse import unquote, urlsplit
 
 import backoff
 import certifi
-from annas.common import work_dir_callback
 import mobi
 import requests
 import typer
@@ -27,9 +27,14 @@ from unstructured.file_utils.filetype import detect_filetype
 from unstructured.partition.auto import partition
 from unstructured.staging.base import element_to_md
 
+from annas.common import work_dir_callback
 from annas.scrape import ANNAS_BASE_URL, SearchResult, scrape_search_results
-from annas.state import AnnasState, configure_state, require_state
-from annas.store import DocumentMetadata, ElementLike, load_elements, store_app
+from annas.store import (
+    DocumentMetadata,
+    ElementLike,
+    load_elements,
+    store_app,
+)
 
 FAST_DOWNLOAD_ENDPOINT = f"{ANNAS_BASE_URL}/dyn/api/fast_download.json"
 MD5_PATTERN = re.compile(r"[0-9a-f]{32}", re.IGNORECASE)
@@ -42,6 +47,19 @@ class ArtifactValidationError(RuntimeError):
 
 app = typer.Typer(help="CLI for Anna's Archive helpers.")
 app.add_typer(store_app, name="store")
+
+
+def _build_session() -> requests.Session:
+    """Construct a requests session with repo-standard headers."""
+
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": "audio-agents-annas/0.1 (+https://annas-archive.org)",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+    )
+    return session
 
 
 @app.command()
@@ -73,18 +91,6 @@ def search_catalog(
 @app.command()
 def download(
     md5: Annotated[str, typer.Argument(help="Anna's Archive md5 identifier")],
-    collection: Annotated[
-        Optional[str],
-        typer.Option(help="Optional Chroma collection name for ingestion"),
-    ] = None,
-    ocr_limit: Annotated[
-        Optional[float],
-        typer.Option(
-            help="Abort PDFs when OCR text exceeds this fraction",
-            min=0.0,
-            max=1.0,
-        ),
-    ] = None,
     work_dir: Annotated[
         Path,
         typer.Option(
@@ -97,7 +103,6 @@ def download(
             help="Directory for downloads and derived artifacts",
         ),
     ],
-    # NOTE: NEVER MAKE THINGS OPTIONAL that are not optional!!!!!!!!!!
     secret_key: Annotated[
         str,
         typer.Option(
@@ -106,6 +111,18 @@ def download(
             show_default=False,
         ),
     ],
+    collection: Annotated[
+        Optional[str],
+        typer.Option(help="Optional Chroma collection name for ingestion"),
+    ] = None,
+    ocr_limit: Annotated[
+        Optional[float],
+        typer.Option(
+            help="Abort PDFs when OCR text exceeds this fraction",
+            min=0.0,
+            max=1.0,
+        ),
+    ] = None,
 ) -> Path:
     """Download a file by md5, normalize artifacts, and optionally ingest chunks."""
 
@@ -113,6 +130,8 @@ def download(
         assert 0.0 <= ocr_limit <= 1.0, "ocr_limit must be between 0.0 and 1.0"
 
     md5_value = _validate_md5(md5)
+
+    session = _build_session()
 
     logger.info("Fetching md5={md5}", md5=md5_value)
     last_error: Optional[Exception] = None
@@ -127,9 +146,7 @@ def download(
             if domain_index is not None:
                 params["domain_index"] = str(domain_index)
             try:
-                response = _retrying_get(
-                    current.session, FAST_DOWNLOAD_ENDPOINT, params=params
-                )
+                response = _retrying_get(session, FAST_DOWNLOAD_ENDPOINT, params=params)
             except requests.HTTPError as exc:
                 logger.warning(
                     "Fast download request failed for path {} domain {}: {}",
@@ -148,12 +165,16 @@ def download(
 
             try:
                 download_response = _retrying_get(
-                    current.session,
+                    session,
                     download_url,
                     stream=True,
                     timeout=300,
                 )
-                download_path = _write_stream(current, md5_value, download_response)
+                artifact_dir = work_dir / md5_value
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                download_path = _write_stream(
+                    md5_value, download_response, artifact_dir
+                )
                 break
             except ArtifactValidationError as exc:
                 logger.warning(
@@ -196,11 +217,11 @@ def download(
             filename=document_metadata.filename,
         )
     markdown = _elements_to_markdown(elements)
-    markdown_path = _markdown_path_for_md5(current, md5_value)
+    markdown_path = _first_markdown_path(work_dir, md5_value)
     markdown_path.write_text(markdown, encoding="utf-8")
     if collection:
         load_elements(
-            current,
+            work_dir,
             md5_value,
             elements,
             collection,
@@ -216,6 +237,18 @@ def download(
 def search_downloaded_text(
     md5: Annotated[str, typer.Argument(help="md5 to search within")],
     needle: Annotated[str, typer.Argument(help="Case-insensitive text to find")],
+    work_dir: Annotated[
+        Path,
+        typer.Option(
+            envvar="ANNAS_DOWNLOAD_PATH",
+            exists=False,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=False,
+            callback=work_dir_callback,
+            help="Directory containing downloaded artifacts",
+        ),
+    ],
     before: Annotated[
         int,
         typer.Option("--before", min=0, help="Lines to include before each match"),
@@ -228,11 +261,9 @@ def search_downloaded_text(
         int,
         typer.Option("--limit", min=1, help="Maximum snippets to return"),
     ] = 3,
-    ctx: Optional[typer.Context] = None,
 ) -> str:
     """Return markdown snippets around a needle for an existing md5 artifact."""
 
-    current = require_state(ctx)
     md5_value = _validate_md5(md5)
     normalized = needle.strip()
     assert normalized, "needle must be non-empty"
@@ -240,7 +271,7 @@ def search_downloaded_text(
     assert after >= 0, "after must be non-negative"
     assert limit >= 1, "limit must be >= 1"
 
-    markdown_path = _markdown_path_for_md5(current, md5_value)
+    markdown_path = _first_markdown_path(work_dir, md5_value)
 
     if not markdown_path.exists():
         typer.echo("")
@@ -390,11 +421,10 @@ def _validate_md5(md5: str) -> str:
     return candidate
 
 
-# TODO: remove this, NO WRAPPER include work_path argument ONLY for commands that need it. Initialize the dir by getting work_dir argument value (when given) modeled after: https://typer.tiangolo.com/tutorial/options/callback-and-context/?h=call#using-the-callbackparam-object
-# def _artifact_dir(state: AnnasState, md5: str) -> Path:
-#     path = state.work_path / md5
-#     path.mkdir(parents=True, exist_ok=True)
-#     return path
+def _artifact_dir(work_dir: Path, md5: str) -> Path:
+    path = Path(work_dir) / md5
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _write_stream(md5: str, response: requests.Response, target_dir: Path) -> Path:
@@ -636,8 +666,9 @@ def _document_metadata_from_path(path: Path) -> DocumentMetadata:
     )
 
 
-def _markdown_path_for_md5(state: AnnasState, md5: str) -> Path:
-    target_dir = _artifact_dir(state, md5)
+def _first_markdown_path(work_dir: Path, md5: str) -> Path:
+    target_dir = work_dir / md5
+    target_dir.mkdir(parents=True, exist_ok=True)
     candidates = sorted(target_dir.glob("*.md"))
     if not candidates:
         return target_dir / "converted.md"
