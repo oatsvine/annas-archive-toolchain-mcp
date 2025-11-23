@@ -1,60 +1,62 @@
-# Anna's Archive Toolchain
+# Anna's Archive Toolchain (Typer CLI + Chroma)
 
-Research teams use the toolkit to execute a repeatable acquisition loop: shortlist new
-titles, secure final copies, stage them for retrieval-augmented generation, and surface
-grounded citations on demand. The codebase centres on a typed CLI façade
-(`annas.cli`) built with Typer that coordinates live scraping, artifact normalization,
-optional vector-store ingestion, and a dedicated `store` subcommand group for Chroma
-operations.
+**Human-friendly, robust, and RAG-ready CLI for Anna's Archive** — search the live catalog, download reliable artifacts, normalize them to Markdown, and ingest chunks into Chroma so retrieval-augmented generation just works. Built as a Typer CLI with Playwright-powered search, fast MD5 downloads, Markdown normalization, and semantic search over EPUB/PDF/MOBI content.
 
-- Playwright-driven scraping captures search result metadata directly from the public
-  site using DOM interactions that match the published UI.
-- Fast downloads are normalized into a working directory, converted to Markdown via
-  `unstructured`, and optionally chunked into a Chroma collection for retrieval tasks.
-- Strict typing (Pyright) and integration tests exercise live search, pagination,
-  metadata accuracy, and authenticated downloads.
+## Why this toolchain
+- **Accurate catalog search**: Rich-rendered results with verified metadata (format, size, language, year) for fast triage.
+- **Reliable downloads**: Fast-download routing with retries, extension validation, MOBI→HTML conversion, and Markdown generation via `unstructured`.
+- **RAG-first ingestion**: Optional chunking straight into Chroma collections for semantic search and grounded answers.
+- **Typed & tested**: Pyright strict, pytest live-paths, and explicit Typer options (no hidden state).
 
-## Workflow: CLI Commands
+## Quick start
+```bash
+uv sync
+# Set env (or .env): ANNAS_SECRET_KEY, ANNAS_DOWNLOAD_PATH
+uv run python -m annas.cli search-catalog plato --limit 5
+uv run python -m annas.cli download <md5> --work-dir /tmp/annas --collection my-chroma
+uv run python -m annas.cli search-downloaded-text <md5> "needle" --work-dir /tmp/annas
+uv run python -m annas.cli store query-collection my-chroma "Republic" --work-dir /tmp/annas
+```
 
-The Typer CLI maintains shared state (download path, requests session, Chroma client)
-via a callback. Core commands live at the root, with Chroma helpers under `store`:
+## Features (status)
+- [x] Rich-powered `search-catalog` table with clickable titles and precise metadata.
+- [x] Fast-download with retry/backoff, md5 validation, format detection, MOBI conversion.
+- [x] Markdown normalization with page markers, titles, and list handling.
+- [x] Chroma ingestion + metadata inspection + text querying (`store` subcommands).
+- [x] Strict typing (Pyright) and Black formatting.
+- [ ] MCP server surface (planned).
 
-| Command | Purpose |
+## Commands at a glance
+| Command | What it does |
 | --- | --- |
-| `annas search-catalog QUERY --limit 200` | Triage the live catalog to shortlist promising books with rich `SearchResult` metadata. |
-| `annas download MD5 [--collection NAME]` | Retrieve the selected book, normalize it to Markdown, and optionally ingest chunks into a shared Chroma collection for RAG. |
-| `annas search-downloaded-text MD5 NEEDLE` | Validate quotations or pull quick reference snippets directly from cached Markdown. |
-| `annas store metadata COLLECTION [--md5s ...]` | Inspect stored chunk metadata for a collection. |
-| `annas store query-collection COLLECTION QUERY [--md5s ...]` | Run similarity search across the ingested corpus to surface context paragraphs and grounded citations. |
+| `annas search-catalog QUERY --limit N` | Live Anna’s Archive search with rich, linkable results. |
+| `annas download MD5 [--collection NAME]` | Download, validate, normalize to Markdown, optional Chroma ingest. |
+| `annas search-downloaded-text MD5 NEEDLE` | Pull contextual Markdown snippets from cached downloads. |
+| `annas store metadata COLLECTION [--md5s ...]` | Inspect stored chunk metadata in Chroma. |
+| `annas store query-collection COLLECTION QUERY [--md5s ...]` | Semantic search over ingested chunks for grounded context. |
 
-All commands assert their preconditions (e.g., non-empty inputs, valid MD5 hashes) and
-surface clear errors when remote services fail.
+## Architecture (data flow)
+1. **Search**: Playwright-backed scraper normalizes results into `SearchResult` records.
+2. **Download**: Fast-download API with retries writes artifacts, validates extensions, converts MOBI/AZW → HTML when needed.
+3. **Normalize**: `unstructured.partition` → `_elements_to_markdown` adds headings, lists, and page markers.
+4. **Ingest (optional)**: `store.load_elements` chunks Markdown to Chroma with rich metadata (title, author, pages, tags, size).
+5. **Retrieve**: `search-downloaded-text` for exact snippets; `store.query-collection` for semantic hits.
 
-### Environment Expectations
+## Roadmap
+- [ ] MCP server parity with CLI surface.
+- [ ] Pre-warmed NLTK data cache to avoid first-run downloads.
+- [ ] Additional format heuristics for edge-case archives.
 
-- `ANNAS_DOWNLOAD_PATH` (or `work_path` argument) must point to a writable location for
-  downloads and derived artifacts.
-- `ANNAS_SECRET_KEY` is required for fast downloads; live search can run without it.
-- Chromium Playwright binaries should be available.
+## Prior art / Inspiration
+- `annas-mcp` by iosifache — MCP server exposing Anna’s Archive tools: https://github.com/iosifache/annas-mcp
 
-## Data Flow Overview
+## Requirements
+- Python 3.11+
+- `ANNAS_SECRET_KEY` (for fast downloads)
+- `ANNAS_DOWNLOAD_PATH` (writable workspace)
+- Playwright Chromium available for live search.
 
-1. **Catalog search** — `annas.scrape.scrape_search_results` launches a headless Chromium
-   session, submits the query, paginates through results, and normalizes each card into a
-   `SearchResult` that feeds the research reading list.
-2. **Artifact ingest** — `download_artifact` validates the MD5, hits the fast-download
-   endpoint, streams the payload to disk, and sends it through `unstructured.partition`.
-3. **Markdown normalization** — `_elements_to_markdown` arranges titles, lists, page
-   markers, and tables into readable Markdown.
-4. **Vector-store loading** — When requested, `store.load_elements` chunks the Markdown
-   with unstructured's splitter and upserts structured records into Chroma.
-5. **Retrieval** — `search_downloaded_text` surfaces quick Markdown snippets for fact checks;
-   `store.query_collection` runs semantic queries across the ingested Chroma collection to
-   power grounded citations.
-
-## Quality & Testing
-
-- `pyright` enforces strict typing across the codebase.
-- `pytest -q` exercises both unit utilities and live Anna's Archive workflows (search,
-  pagination, download, metadata validation). Integration tests require network access,
-  Playwright Chromium, and a valid `ANNAS_SECRET_KEY`.
+## Testing & quality
+- `uv run --extra dev pyright`
+- `uv run black .`
+- `uv run pytest -q` (network + secrets required for live paths)
