@@ -16,6 +16,7 @@ from urllib.parse import unquote, urlsplit
 
 import backoff
 import certifi
+from annas.common import work_dir_callback
 import mobi
 import requests
 import typer
@@ -41,17 +42,6 @@ class ArtifactValidationError(RuntimeError):
 
 app = typer.Typer(help="CLI for Anna's Archive helpers.")
 app.add_typer(store_app, name="store")
-
-
-def work_dir_callback(ctx: typer.Context, param: typer.CallbackParam, value: str):
-    if ctx.resilient_parsing:
-        return
-    logger.debug(f"Validating param: {param.name}")
-    if param.name == "work_dir":
-        work_dir = Path(value)
-        logger.debug(f"Ensuring work_dir exists at: {work_dir}")
-        work_dir.mkdir(parents=True, exist_ok=True)
-    return value
 
 
 @app.command()
@@ -106,15 +96,16 @@ def download(
             callback=work_dir_callback,
             help="Directory for downloads and derived artifacts",
         ),
-    ] = Path("/tmp/annas"),
+    ],
+    # NOTE: NEVER MAKE THINGS OPTIONAL that are not optional!!!!!!!!!!
     secret_key: Annotated[
-        Optional[str],
+        str,
         typer.Option(
             envvar="ANNAS_SECRET_KEY",
             help="Secret key for fast download API",
             show_default=False,
         ),
-    ] = None,
+    ],
 ) -> Path:
     """Download a file by md5, normalize artifacts, and optionally ingest chunks."""
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import re
 from typing import Annotated, Any, Dict, List, Optional, Protocol, Sequence, cast
 
+from annas.common import work_dir_callback
 import chromadb
 import typer
 from chromadb.api.models.Collection import Collection
@@ -91,20 +93,34 @@ def store_callback(ctx: Optional[typer.Context] = None) -> None:
     require_state(ctx)
 
 
-def _collection(state: AnnasState, name: str) -> Collection:
-    if state.chroma_client is None:
-        state.chroma_client = chromadb.PersistentClient(
-            path=str(state.work_path / "chroma")
-        )
-    return state.chroma_client.get_or_create_collection(name)
+# TODO: No WRAPPER you cannot do this.
+# def _collection(state: AnnasState, name: str) -> Collection:
+#     if state.chroma_client is None:
+#         state.chroma_client = chromadb.PersistentClient(
+#             path=str(state.work_path / "chroma")
+#         )
+#     return state.chroma_client.get_or_create_collection(name)
 
 
 @store_app.command()
 def metadata(
-    ctx: Optional[typer.Context] = None,
-    collection: Annotated[
+    collection_name: Annotated[
         str,
         typer.Argument(help="Chroma collection name to inspect"),
+    ],
+    # NOTE: NEVER mix defaults with envvars. your envvar is required, make it required (simply by not providing a default and not using Optional)
+    # NOTE: Order matters, you must put non-optional options before optional ones
+    work_dir: Annotated[
+        Path,
+        typer.Option(
+            envvar="ANNAS_DOWNLOAD_PATH",
+            exists=False,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=False,
+            callback=work_dir_callback,
+            help="Directory for downloads and derived artifacts",
+        ),
     ],
     n: Annotated[
         int,
@@ -121,14 +137,19 @@ def metadata(
 ) -> List[str]:
     """Return metadata rows from a Chroma collection."""
 
-    current = require_state(ctx)
+    # NOTE: THIS IS A CLI. WTF would be the point of sharing the client in a stateful way?
+    client = chromadb.PersistentClient(
+             path=str(work_dir / "chroma")
+         )
     md5_filter: Optional[Where] = None
     if md5s:
         md5_list = [_validate_md5(m) for m in md5s.split(",") if m.strip()]
         if md5_list:
             md5_filter = cast(Where, {"md5": {"$in": md5_list}})
-    collection_client = _collection(current, collection)
-    query_result: QueryResult = collection_client.query(
+    # TODO: NO WRAPPER, use you canonical chroma client here, goto definition and lookup official docs to use it correctly.   
+    # collection_client = _collection(current, collection_name)
+    collection = client.get_or_create_collection(collection_name) 
+    query_result: QueryResult = collection.query(
         n_results=n,
         where=md5_filter,
         include=["documents", "metadatas"],
