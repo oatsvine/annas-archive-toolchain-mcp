@@ -33,7 +33,6 @@ dependencies = [
     { name = "ebooklib" },
     { name = "epub-utils" },
     { name = "fastmcp" },
-    { name = "fire" },
     { name = "html2text" },
     { name = "httpx" },
     { name = "loguru" },
@@ -45,6 +44,7 @@ dependencies = [
     { name = "pypandoc" },
     { name = "pyright" },
     { name = "rich" },
+    { name = "typer" },
     { name = "unstructured", extra = ["md"] },
 ]
 
@@ -62,6 +62,9 @@ langchain = [
     { name = "langchain" },
     { name = "langchain-text-splitters" },
 ]
+legacy = [
+    { name = "fire" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -71,7 +74,7 @@ requires-dist = [
     { name = "ebooklib" },
     { name = "epub-utils" },
     { name = "fastmcp" },
-    { name = "fire" },
+    { name = "fire", marker = "extra == 'legacy'" },
     { name = "html2text" },
     { name = "httpx" },
     { name = "langchain", marker = "extra == 'langchain'" },
@@ -90,9 +93,10 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "rich" },
     { name = "sqlmodel", marker = "extra == 'db'", specifier = ">=0.0.24" },
+    { name = "typer" },
     { name = "unstructured", extras = ["md"] },
 ]
-provides-extras = ["db", "langchain", "dev"]
+provides-extras = ["db", "langchain", "dev", "legacy"]
 
 [[package]]
 name = "annotated-types"

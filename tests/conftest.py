@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Callable, Dict, Iterable, List
 import pytest
 
 if TYPE_CHECKING:
-    from annas.cli import Annas
+    from annas.state import AnnasState
     from unstructured.documents.elements import Element
 
 
@@ -43,8 +43,8 @@ def partition_elements() -> Callable[[Path], List["Element"]]:
 
 
 @pytest.fixture()
-def annas_tmp(tmp_path: Path) -> Iterable["Annas"]:
-    from annas.cli import Annas
+def annas_tmp(tmp_path: Path) -> Iterable["AnnasState"]:
+    from annas.state import AnnasState, configure_state
 
-    annas = Annas(work_path=tmp_path)
-    yield annas
+    annas_state = configure_state(tmp_path, None)
+    yield annas_state

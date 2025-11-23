@@ -42,7 +42,8 @@
   ```
 - Ordering matters: all required params (no defaults) first; defaults after. Avoid “non-default argument follows default argument” by keeping `Option(...` required params before any defaulted ones.
 - AWLAYS use env-backed required options instead of manual `_require_env` helpers (`token: Annotated[str, Option(envvar="CIVITAI_API_KEY")]`).
-- When migrating from `fire`, move `__init__` level arguments to individual command functions requiring these values. Remove class pattern ENTIRELY, use `envvar` for environment mapped argument and define small `Context` dataclass only if statefullness really needed using composition.
+- When migrating from `fire`, move `__init__` level arguments to individual command functions requiring these values. Remove class pattern ENTIRELY, use `envvar` for environment mapped argument and define small state dataclass (no dictionary) only if statefullness really needed using composition.
+- Strongly avoid wrapping infernal functions, prefer implementing your logic directly in the command function.
 - Do not wrap commands in thin helpers; put command logic directly in the Typer command functions.
 - Reference: Typer tutorial on arguments/options with `Annotated` (`https://typer.tiangolo.com/tutorial/arguments/optional/`).
 
