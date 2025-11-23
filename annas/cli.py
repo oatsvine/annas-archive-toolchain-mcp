@@ -118,7 +118,6 @@ class Annas:
         work_path: Path | str = os.environ.get("ANNAS_DOWNLOAD_PATH", "/tmp/annas"),
         secret_key: Optional[str] = os.environ.get("ANNAS_SECRET_KEY"),
     ) -> None:
-
         self.work_path = Path(work_path).resolve()
         self.work_path.mkdir(parents=True, exist_ok=True)
 
@@ -157,7 +156,6 @@ class Annas:
     # ────────────────────────────────── Public API ──────────────────────────────────
 
     def _search_catalog(self, query: str, limit: int = 20) -> List[SearchResult]:
-
         normalized = query.strip()
         assert normalized, "query must be non-empty"
         assert limit >= 1, "limit must be >= 1"
@@ -176,7 +174,7 @@ class Annas:
         hash is wrapped in a `SearchResult` model to ensure URL integrity and capture
         the published metadata (language, format, size, provenance).
         """
-        return self._search_catalog(query, limit=limit)
+        return self._search_catalog(str(query), limit=limit)
 
     def download(
         self,
@@ -347,7 +345,9 @@ class Annas:
             logger.warning("Unable to compute fast-text baseline: {}", exc)
             return 1.0
 
-        fast_chars = self._count_text_characters(cast(Sequence[ElementLike], fast_elements))
+        fast_chars = self._count_text_characters(
+            cast(Sequence[ElementLike], fast_elements)
+        )
         if fast_chars <= 0:
             return 1.0
         if fast_chars >= hi_chars:
@@ -527,7 +527,9 @@ class Annas:
                 rendered = str(raw_text).strip()
             if not rendered:
                 continue
-            if (category in {"list_item", "listitem"} or isinstance(element, ListItem)) and not rendered.startswith("- "):
+            if (
+                category in {"list_item", "listitem"} or isinstance(element, ListItem)
+            ) and not rendered.startswith("- "):
                 rendered = f"- {rendered}"
             lines.append(rendered)
             lines.append("")
@@ -576,12 +578,16 @@ class Annas:
         title_found = False
         for element in typed_elements:
             metadata = element.metadata
-            assert isinstance(metadata, ElementMetadata), "element.metadata must be ElementMetadata"
+            assert isinstance(
+                metadata, ElementMetadata
+            ), "element.metadata must be ElementMetadata"
             if metadata.page_number is not None:
                 document_page_numbers.add(metadata.page_number)
             if not title_found and isinstance(element, Title) and element.text.strip():
                 candidate = element.text.strip()
-                if not self._is_generic_heading(candidate) and not self._looks_like_chapter(candidate):
+                if not self._is_generic_heading(
+                    candidate
+                ) and not self._looks_like_chapter(candidate):
                     title = candidate
                     title_found = True
 
@@ -891,7 +897,6 @@ class Annas:
         return words.title() if words else ""
 
     def _document_metadata_from_path(self, path: Path) -> DocumentMetadata:
-
         stem, extension = self._split_extension(path.name)
         components = [part for part in stem.split("__") if part]
         size_bytes = path.stat().st_size if path.exists() else None

@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
   "pydantic>=2.11.4",
   "rich",
-  "fire",
+  "typer",
   "loguru",
   "backoff",
   "playwright",
@@ -42,6 +42,10 @@ dev = [
   "pytest",
   "pytest-asyncio",
   "langchain-mcp-adapters",
+]
+
+legacy = [
+  "fire",
 ]
 
 [tool.setuptools]
