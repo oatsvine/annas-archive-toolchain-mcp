@@ -36,7 +36,7 @@ dependencies = [
 
 [project.optional-dependencies]
 epub = [
-  "unstructured[epub]",
+  "unstructured[epub,docx]",
   "EbookLib",
   "mobi",
   "epub-utils",
@@ -50,20 +50,19 @@ mcp = [
   "fastmcp",
 ]
 
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "black",
+  "pyright",
+]
+
 [tool.setuptools]
 packages = ["annas", "tests"]
 
 [tool.pyright]
 include = ["annas","tests"]
 exclude = ["**/node_modules", "**/__pycache__", "lib"]
-
-[tool.uv]
-dev-dependencies = [
-  "pytest",
-  "pytest-asyncio",
-  "black",
-  "pyright",
-]
 
 [tool.uv.pip]
 prerelease = "allow"
