@@ -19,26 +19,23 @@ keywords = [
 ]
 
 dependencies = [
+  "backoff",
+  "chromadb",
+  "loguru",
+  "mobi",
   "pydantic>=2.11.4",
+  "requests",
   "rich",
   "typer-slim>=0.20.0",
-  "loguru",
-  "backoff",
   "playwright",
   "unstructured[md]",
-  "pypandoc",
-  "html2text",
-  "markdown",
-  "prettytable",
-  "httpx",
-  "chromadb",
 ]
 
 [project.optional-dependencies]
+
 epub = [
   "unstructured[epub,docx]",
   "EbookLib",
-  "mobi",
   "epub-utils",
 ]
 
@@ -50,6 +47,7 @@ mcp = [
   "fastmcp",
 ]
 
+[dependency-groups]
 dev = [
   "pytest",
   "pytest-asyncio",
@@ -63,6 +61,8 @@ packages = ["annas", "tests"]
 [tool.pyright]
 include = ["annas","tests"]
 exclude = ["**/node_modules", "**/__pycache__", "lib"]
+venvPath = "."
+venv = ".venv"
 
 [tool.uv.pip]
 prerelease = "allow"
@@ -70,4 +70,7 @@ prerelease = "allow"
 [tool.pytest.ini_options]
 testpaths = [
     "tests",
+]
+pythonpath = [
+    ".",
 ]

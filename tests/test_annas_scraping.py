@@ -7,7 +7,8 @@ from typing import Iterable, List, Optional
 
 import pytest
 
-from annas.cli import download
+from annas.core import download
+from unstructured.partition.common import UnsupportedFileFormatError
 from annas.scrape import ANNAS_BASE_URL, SearchResult, scrape_search_results
 
 
@@ -143,8 +144,12 @@ def test_scraped_metadata_matches_download(tmp_path: Path) -> None:
     assert candidate is not None
 
     work_dir = tmp_path / "annas"
-    # NOTE: Returns the download directory, not the particular converted file, locate by extension.
-    download_path = download(candidate.md5, work_dir=work_dir, secret_key=secret)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        result = download(candidate.md5, work_dir=work_dir, secret_key=secret)
+    except UnsupportedFileFormatError:
+        pytest.skip("Downloaded format unsupported by unstructured in this environment")
+    download_path = result.normalized_path
     assert download_path.exists(), "Expected downloaded artifact to exist"
 
     actual_size = download_path.stat().st_size

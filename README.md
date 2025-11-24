@@ -40,7 +40,7 @@ uv run python -m annas.cli store query-collection my-chroma "Republic" --work-di
 ## Architecture (data flow)
 1. **Search**: Playwright-backed scraper normalizes results into `SearchResult` records.
 2. **Download**: Fast-download API with retries writes artifacts, validates extensions, converts MOBI/AZW → HTML when needed.
-3. **Normalize**: `unstructured.partition` → `_elements_to_markdown` adds headings, lists, and page markers.
+3. **Normalize**: `unstructured.partition` → `elements_to_markdown` adds headings, lists, and page markers.
 4. **Ingest (optional)**: `store.load_elements` chunks Markdown to Chroma with rich metadata (title, author, pages, tags, size).
 5. **Retrieve**: `search-downloaded-text` for exact snippets; `store.query-collection` for semantic hits.
 

@@ -5,12 +5,8 @@ from urllib.parse import quote
 
 import pytest
 
-from annas.cli import (
-    _detect_extension,
-    _document_metadata_from_path,
-    _sanitize_filename,
-    search_catalog,
-)
+from annas.core import document_metadata_from_path, sanitize_filename, search_catalog
+from annas.util import detect_extension
 from annas.store import _extract_chapter
 from annas.scrape import ANNAS_BASE_URL, SearchResult
 
@@ -78,8 +74,8 @@ def test_document_metadata_from_sanitized_filename(tmp_path: Path) -> None:
         md5=md5,
         extension="epub",
     )
-    sanitized = _sanitize_filename(raw_name, md5)
-    metadata = _document_metadata_from_path(Path(tmp_path / sanitized))
+    sanitized = sanitize_filename(raw_name, md5)
+    metadata = document_metadata_from_path(Path(tmp_path / sanitized))
     assert metadata.title == "The Republic"
     assert metadata.author == "Plato"
 
@@ -93,5 +89,5 @@ def test_extract_chapter_heading() -> None:
 def test_detect_extension_pdf(tmp_path: Path) -> None:
     path = tmp_path / "sample.bin"
     path.write_bytes(b"%PDF-1.7\nrest")
-    detected = _detect_extension(path)
+    detected = detect_extension(path)
     assert detected == "pdf"

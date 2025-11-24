@@ -5,18 +5,20 @@ from pathlib import Path
 from typing import Callable
 
 import pytest
-from annas.cli import (
-    _compute_pdf_ocr_ratio,
-    _count_text_characters,
-    _detect_extension,
-    _document_metadata_from_path,
-    _elements_to_markdown,
-    _sanitize_filename,
+from annas.core import (
+    document_metadata_from_path,
     download,
+    sanitize_filename,
     search_catalog,
     search_downloaded_text,
 )
 from annas.store import _looks_like_chapter
+from annas.util import (
+    compute_pdf_ocr_ratio,
+    count_text_characters,
+    detect_extension,
+    elements_to_markdown,
+)
 from unstructured.documents.elements import (
     Element,
     ElementMetadata,
@@ -55,8 +57,8 @@ def test_download_artifact_real_download_when_secret_key_present(
         pytest.skip("No supported search results available for download verification")
     assert candidate is not None
     md5 = candidate.md5
-    download_path = download(md5, work_dir=tmp_path, secret_key=secret)
-    assert download_path.exists()
+    result = download(md5, work_dir=tmp_path, secret_key=secret)
+    assert result.normalized_path.exists()
 
 
 def test_search_downloaded_text_reads_markdown_context(annas_tmp: Path) -> None:
@@ -76,7 +78,7 @@ def test_search_downloaded_text_reads_markdown_context(annas_tmp: Path) -> None:
 
 def test_sanitize_filename_truncates_and_preserves_extension(annas_tmp: Path) -> None:
     long_name = "very long " * 40 + ".pdf"
-    safe = _sanitize_filename(long_name, "a" * 32)
+    safe = sanitize_filename(long_name, "a" * 32)
     assert len(safe) <= 120
     assert safe.endswith(".pdf")
 
@@ -108,7 +110,7 @@ def test_elements_to_markdown_formats_titles_and_lists(annas_tmp: Path) -> None:
             metadata=ElementMetadata(page_number=2),
         ),
     ]
-    markdown = _elements_to_markdown(elements)
+    markdown = elements_to_markdown(elements)
     assert "# Introduction" in markdown
     assert "- Item one" in markdown
     assert "## Next Section" in markdown
@@ -142,14 +144,14 @@ def test_detect_extension_falls_back_to_suffix(
     def _raise(*_args, **_kwargs):
         raise RuntimeError("libmagic missing")
 
-    monkeypatch.setattr("annas.cli.detect_filetype", _raise)
-    assert _detect_extension(path) == "custom"
+    monkeypatch.setattr("annas.util.detect_filetype", _raise)
+    assert detect_extension(path) == "custom"
 
 
 def test_document_metadata_from_path_parses_segments(tmp_path: Path) -> None:
     path = tmp_path / "author__title__extra-info.epub"
     path.write_bytes(b"data")
-    metadata = _document_metadata_from_path(path)
+    metadata = document_metadata_from_path(path)
     assert metadata.author == "Author"
     assert metadata.title == "Title"
     assert metadata.extras == ["Extra-Info"]
@@ -162,7 +164,11 @@ def test_corpus_files_under_size_limit(corpus_files: list[Path]) -> None:
         assert size_mb <= 10.0, f"Corpus file {path.name} exceeds 10 MB"
 
 
-def test_partition_fast_on_corpus_pdfs(corpus_paths: dict[str, list[Path]]) -> None:
+def test_partition_fast_on_corpus_pdfs(
+    corpus_paths: dict[str, list[Path]], pdf_enabled: bool
+) -> None:
+    if not pdf_enabled:
+        pytest.skip("Enable PDF corpus checks with --pdf")
     from unstructured.partition.auto import partition
 
     pdfs = corpus_paths.get("pdf", [])
@@ -181,7 +187,8 @@ def test_partition_auto_on_corpus_epubs(
     corpus_paths: dict[str, list[Path]],
 ) -> None:
     epubs = corpus_paths.get("epub", [])
-    assert epubs, "Expected at least one EPUB sample in corpus"
+    if not epubs:
+        pytest.skip("Corpus has no EPUB samples")
     for epub in epubs:
         elements = partition_elements(epub)
         assert elements, f"Partition produced no elements for {epub.name}"
@@ -194,7 +201,7 @@ def test_count_text_characters_strips_whitespace() -> None:
         _StubElement(" \n "),
         _StubElement("World"),
     ]
-    total = _count_text_characters(elements)
+    total = count_text_characters(elements)
     assert total == 10
 
 
@@ -215,8 +222,8 @@ def test_compute_pdf_ocr_ratio_uses_fast_partition(
         assert strategy == "fast"
         return [_StubElement("Hello")]
 
-    monkeypatch.setattr("annas.cli.partition", _fake_partition)
-    ratio = _compute_pdf_ocr_ratio(path, "sample.pdf", hi_elements)
+    monkeypatch.setattr("annas.util.partition", _fake_partition)
+    ratio = compute_pdf_ocr_ratio(path, "sample.pdf", hi_elements)
     assert fast_calls == ["fast"]
     assert ratio == pytest.approx((10 - 5) / 10)
 
@@ -234,8 +241,8 @@ def test_compute_pdf_ocr_ratio_no_text_short_circuits(
         called = True
         return []
 
-    monkeypatch.setattr("annas.cli.partition", _fake_partition)
-    ratio = _compute_pdf_ocr_ratio(path, "sample.pdf", hi_elements)
+    monkeypatch.setattr("annas.util.partition", _fake_partition)
+    ratio = compute_pdf_ocr_ratio(path, "sample.pdf", hi_elements)
     assert ratio == 1.0
     assert called is False
 
@@ -243,5 +250,5 @@ def test_compute_pdf_ocr_ratio_no_text_short_circuits(
 def test_compute_pdf_ocr_ratio_non_pdf_returns_none(tmp_path: Path) -> None:
     path = tmp_path / "sample.epub"
     path.write_bytes(b"epub")
-    ratio = _compute_pdf_ocr_ratio(path, "sample.epub", [])
+    ratio = compute_pdf_ocr_ratio(path, "sample.epub", [])
     assert ratio is None

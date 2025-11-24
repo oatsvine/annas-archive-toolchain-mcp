@@ -43,3 +43,17 @@ def partition_elements() -> Callable[[Path], List["Element"]]:
 @pytest.fixture()
 def annas_tmp(tmp_path: Path) -> Iterable[Path]:
     yield tmp_path
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--pdf",
+        action="store_true",
+        default=False,
+        help="Enable PDF corpus tests (can be slow)",
+    )
+
+
+@pytest.fixture(scope="session")
+def pdf_enabled(request: pytest.FixtureRequest) -> bool:
+    return bool(request.config.getoption("--pdf"))

@@ -7,6 +7,20 @@
 **Core principle:** Challenge every line of code. If a line is not required for correctness, clarity, or measurable performance, **remove it**. Agents tend to over-abstract: resist helper sprawl, avoid “future-proofing,” and keep the API surface minimal.
 **Design lens:** Functional core / imperative shell, explicit dependency injection (Typer `ctx.obj` over globals), and separation of concerns (CLI parsing ≠ business logic ≠ I/O).
 
+### Library vs CLI split (authoritative)
+- `annas/core.py` and `annas/store.py` are library surfaces: no Typer, no console output, no work_dir creation (they may create md5/subdirectories as needed). Raise on failures.
+- CLI concerns live in `annas/cli.py`: Typer wiring, env-backed options, Rich/JSON printing, and directory bootstrap belong here.
+- Store APIs require explicit `ClientAPI` injection; only the CLI should call `get_or_create_chroma`.
+- Tests must target library modules (`core`, `store`, `util`); do not import `annas.cli`.
+- Create base `work_dir` in the CLI callback or fixtures; downstream helpers assume it already exists.
+- Format extras: keep EPUB/DOCX and PDF dependencies as optional extras (install with `uv sync --extra epub`, `--extra pdf`, or `--all-extras`). Never use conditional imports—if a format is needed, install its extra.
+
+### UV + pytest conventions
+- Keep pytest configuration in `pyproject.toml` under `[tool.pytest.ini_options]`; use `pythonpath = ["."]` instead of sys.path hacks.
+- Manage dev-only tooling via `[dependency-groups] dev = ["pytest", "pytest-asyncio", "black", "pyright"]`; install with `uv sync --group dev` or run with `uv run --group dev ...`.
+- Do not add uv-only fields outside the documented schema; prefer `uv run python -m pytest` for test execution.
+- Follow the pydevtools+uv testing pattern: declare pytest as a dev dependency, install via `uv sync --group dev`, and add extras via `--extra ...` or `--all-extras` when format parsers are required.
+
 ## 1) Project Structure
 
 * Use `tree` to get oriented.
@@ -53,8 +67,9 @@
 ## 4) Testing
 
 * Framework: pytest. Tests live in `tests/`, named `test_*.py`.
-* Cover CLI methods (happy paths + edge cases). Keep tests deterministic; mock I/O/LLMs.
+* Target library modules (`core`, `store`, `util`); avoid importing `annas.cli`. Exercise CLI via manual smoke runs instead of unit tests.
 * Treat type errors as failures: `pyright` must pass locally and in CI.
+* Keep heavy PDF checks opt-in via `pytest --pdf`; favor fast EPUB/DOCX/MOBI coverage in defaults. Live Anna's Archive scraping/download tests run by default (only skip when secrets missing).
 
 ## 5) Errors & Contracts
 

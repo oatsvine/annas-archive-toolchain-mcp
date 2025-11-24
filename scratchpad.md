@@ -55,11 +55,11 @@
 - **Bespoke**: Chapter inference still depends on `_extract_chapter`, `_looks_like_chapter`, and generic-heading filters (`annas/cli.py:844-891`), supplementing canonical metadata when partition output lacks rich section titles.
 
 #### Markdown & Staging
-- **Canonical**: `element_to_md` drives per-element rendering while respecting upstream heading depth (`annas/cli.py:431-452`). Markdown formatting test ensures parity with titles and lists (`tests/test_annas_cli.py:58-90`).
-- **Bespoke**: Page markers and bullet normalization ensure consistent snippets across downstream tooling (`annas/cli.py:418-453`). Opportunity exists to validate whether `element_to_md` already prefixes lists, potentially dropping the manual `- ` patch once confirmed by corpus fixtures.
+- **Canonical**: `element_to_md` drives per-element rendering while respecting upstream heading depth (`annas/util.py`). Markdown formatting test ensures parity with titles and lists (`tests/test_annas_cli.py:58-90`).
+- **Bespoke**: Page markers and bullet normalization ensure consistent snippets across downstream tooling (`annas/util.py`). Opportunity exists to validate whether `element_to_md` already prefixes lists, potentially dropping the manual `- ` patch once confirmed by corpus fixtures.
 
 #### Filetype Detection & Container Prep
-- **Canonical**: `_detect_extension` defers to `detect_filetype` and only falls back to suffix inspection when libmagic is unavailable (`annas/cli.py:790-806`), mirroring upstream coverage in `test_unstructured/file_utils/test_filetype.py`.
+- **Canonical**: `detect_extension` defers to `detect_filetype` and only falls back to suffix inspection when libmagic is unavailable (`annas/util.py`), mirroring upstream coverage in `test_unstructured/file_utils/test_filetype.py`.
 - **Bespoke**: Filename slugging, underscore hex decoding, ISBN pulls, and brand stripping (`annas/cli.py:616-789`) normalize Anna’s Archive payloads. Tests guard both fallback detection and slug parsing (`tests/test_annas_cli.py:152-170`, `tests/test_annas_filename_sampling.py:67-93`).
 
 #### Metadata Normalization & Titles
@@ -67,7 +67,7 @@
 - **Bespoke**: Custom fallback title selection, tag assembly, and size formatting keep Chroma metadata exhaustive while excluding boilerplate headings (`annas/cli.py:519-543`). Unit tests cover `ListItem` handling, `Title` selection, and chapter heuristics (`tests/test_annas_cli.py:58-150`).
 
 ### Opportunities (Code Minimization Focus)
-1. **List Markdown Prefixing** – Confirm via corpus fixtures whether `element_to_md` already emits list bullets; if so, remove the explicit `- ` prefix to shrink `_elements_to_markdown`, documenting the corpus evidence per AGENTS minimalism rule.
+1. **List Markdown Prefixing** – Confirm via corpus fixtures whether `element_to_md` already emits list bullets; if so, remove the explicit `- ` prefix to shrink `elements_to_markdown`, documenting the corpus evidence per AGENTS minimalism rule.
 2. **Chapter Detection** – Explore `unstructured.chunking.title` or upcoming section-title metadata to replace `_extract_chapter` + regex fallback, reducing bespoke parsing while preserving title accuracy. Reference `test_unstructured/chunking/test_title.py` once validated.
 3. **Filename Normalization** – Investigate whether unstructured cleaners (e.g., `cleaners.core` slug/whitespace utilities) can supplant portions of `_sanitize_filename`, provided they maintain the md5/author/title guarantees enforced by `tests/test_annas_filename_sampling.py:35-93`.
 4. **MOBI Conversion Dependency** – Compare unstructured’s EPUB pipeline with our MOBI HTML conversion to see if partition `strategy="fast"` on the extracted HTML already fills metadata, allowing us to soften bespoke asset handling.

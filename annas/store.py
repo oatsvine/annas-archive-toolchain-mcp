@@ -1,25 +1,17 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Optional, Protocol, Sequence, cast
+from typing import Any, Dict, List, Optional, Protocol, Sequence, cast
 
 import chromadb
-import typer
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
-from chromadb.api.types import GetResult, Metadata, QueryResult, Where
+from chromadb.api.types import GetResult, Include, Metadata, QueryResult, Where
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from rich.console import Console
 from unstructured.chunking.basic import chunk_elements
 from unstructured.documents.elements import Element, ElementMetadata, Title
-
-from annas.common import work_dir_callback
-
-store_app = typer.Typer(name="store", help="Chroma-backed metadata and query helpers.")
-console = Console()
 
 
 class ElementLike(Protocol):
@@ -93,13 +85,19 @@ class ChunkRecord(BaseModel):
     metadata: Dict[str, str]
 
 
-def get_or_create_chroma(
-    work_dir: Path, client: Optional[ClientAPI] = None
-) -> ClientAPI:
-    """Return a Chroma client rooted in work_dir, allowing test injection of a client."""
+def _stringify_meta(raw: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    metadata = raw or {}
+    cleaned: Dict[str, str] = {}
+    for key, value in metadata.items():
+        if value is None:
+            continue
+        cleaned[str(key)] = str(value)
+    return cleaned
 
-    if client is not None:
-        return client
+
+def get_or_create_chroma(work_dir: Path) -> ClientAPI:
+    """Return a Chroma client rooted in work_dir."""
+
     logger.debug("Opening Chroma client at {}", work_dir / "chroma")
     return chromadb.PersistentClient(path=str(work_dir / "chroma"))
 
@@ -116,11 +114,7 @@ def _metadata(
     n: int,
     md5_filter: Optional[Where],
 ) -> GetResult:
-    """Small helper so tests can inject a client and bypass CLI plumbing when querying.
-
-    Uses `get` (not `query`) so it works without query texts/embeddings and stays stable in
-    tests that only need to fetch stored records.
-    """
+    """Fetch stored chunk metadata for stable inspection."""
 
     collection = _collection(client, collection_name)
     logger.debug(
@@ -129,87 +123,66 @@ def _metadata(
         n,
         collection_name,
     )
-    return collection.get(where=md5_filter, limit=n, include=["documents", "metadatas"])
+    return collection.get(
+        where=md5_filter,
+        limit=n,
+        include=cast(Include, ["documents", "metadatas"]),
+    )
 
 
-@store_app.command()
-def metadata(
-    collection_name: Annotated[
-        str, typer.Argument(help="Chroma collection name to inspect")
-    ],
-    work_dir: Annotated[
-        Path,
-        typer.Option(
-            envvar="ANNAS_DOWNLOAD_PATH",
-            exists=False,
-            file_okay=False,
-            dir_okay=True,
-            resolve_path=False,
-            callback=work_dir_callback,
-            help="Directory for downloads and derived artifacts",
-        ),
-    ],
-    n: Annotated[
-        int, typer.Option("--n", min=1, help="Number of documents to return")
-    ] = 10,
-    md5s: Annotated[
-        Optional[str],
-        typer.Option(
-            "--md5s", help="Comma-separated md5s to filter results", show_default=False
-        ),
-    ] = None,
-) -> List[str]:
-    """Return metadata rows from a Chroma collection."""
+class StoredChunk(BaseModel):
+    """Snapshot of a stored chunk and its metadata."""
 
-    client = get_or_create_chroma(work_dir)
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    metadata: Dict[str, str]
+
+
+def fetch_metadata(
+    client: ClientAPI,
+    collection_name: str,
+    *,
+    n: int = 10,
+    md5s: Optional[Sequence[str]] = None,
+) -> List[StoredChunk]:
+    """Return stored metadata rows without CLI formatting."""
+
+    assert n >= 1, "limit must be >= 1"
     md5_filter: Optional[Where] = None
     if md5s:
-        md5_list = [_validate_md5(m) for m in md5s.split(",") if m.strip()]
+        md5_list = [_validate_md5(m) for m in md5s if m.strip()]
         if md5_list:
             md5_filter = cast(Where, {"md5": {"$in": md5_list}})
     query_result = _metadata(client, collection_name, n, md5_filter)
     docs = query_result["documents"] or []
     metadatas = query_result["metadatas"] or []
-    assert len(docs) == len(metadatas), "Metadata count mismatch"
-    if not docs:
-        console.print("", markup=False)
-        return []
-    assembled = [json.dumps(meta or {}) for meta in metadatas]
-    console.print("\n".join(assembled), markup=False)
-    return assembled
+    ids = query_result["ids"] or []
+    assert len(docs) == len(metadatas) == len(ids), "Metadata count mismatch"
+    return [
+        StoredChunk(
+            id=str(ids[index]),
+            text=str(doc or ""),
+            metadata=_stringify_meta(metadatas[index]),
+        )
+        for index, doc in enumerate(docs)
+        if doc is not None
+    ]
 
 
-@store_app.command()
-def query_collection(
-    collection: Annotated[str, typer.Argument(help="Chroma collection name to query")],
-    query: Annotated[str, typer.Argument(help="Similarity search text")],
-    work_dir: Annotated[
-        Path,
-        typer.Option(
-            envvar="ANNAS_DOWNLOAD_PATH",
-            exists=False,
-            file_okay=False,
-            dir_okay=True,
-            resolve_path=False,
-            callback=work_dir_callback,
-            help="Directory for downloads and derived artifacts",
-        ),
-    ],
-    n: Annotated[
-        int, typer.Option("--n", min=1, help="Number of matching chunks to return")
-    ] = 10,
-    md5s: Annotated[
-        Optional[str],
-        typer.Option(
-            "--md5s", help="Comma-separated md5s to filter results", show_default=False
-        ),
-    ] = None,
-) -> List[str]:
-    """Query a Chroma collection and format the best-matching document chunks."""
+def query_chunks(
+    client: ClientAPI,
+    collection: str,
+    query: str,
+    *,
+    n: int = 10,
+    md5s: Optional[Sequence[str]] = None,
+) -> List[StoredChunk]:
+    """Query a Chroma collection and return chunk payloads."""
 
     assert query.strip(), "query must be non-empty"
     assert n >= 1, "limit must be >= 1"
-    client = get_or_create_chroma(work_dir)
     logger.debug(
         "Querying collection={} text='{}' n={} filter={}",
         collection,
@@ -219,7 +192,7 @@ def query_collection(
     )
     md5_filter: Optional[Where] = None
     if md5s:
-        md5_list = [_validate_md5(m) for m in md5s.split(",") if m.strip()]
+        md5_list = [_validate_md5(m) for m in md5s if m.strip()]
         if md5_list:
             md5_filter = cast(Where, {"md5": {"$in": md5_list}})
     collection_client = _collection(client, collection)
@@ -228,31 +201,26 @@ def query_collection(
         query_texts=[query],
         n_results=n,
         where=md5_filter,
-        include=["documents", "metadatas"],
+        include=cast(Include, ["documents", "metadatas"]),
     )
     docs = query_result["documents"]
     assert docs is not None, "Chroma query must return documents"
     assert docs, "Chroma query returned no document rows"
     metadatas = query_result["metadatas"]
+    ids = query_result["ids"]
     primary_docs: List[str] = docs[0]
     assert metadatas and len(metadatas[0]) == len(
         primary_docs
     ), "Metadata count mismatch"
-    assert primary_docs, "Chroma query returned empty document set"
-    assembled: List[str] = []
-    for i, doc in enumerate(primary_docs):
-        meta = metadatas[0][i] or {}
-        doc_id = query_result["ids"][0][i]
-        base_title = meta.get("title") or "Untitled"
-        chapter = meta.get("chapter")
-        heading = base_title if not chapter else f"{base_title} — {chapter}"
-        snippet = (
-            f"─────────────────── Chunk {i+1} - {heading} ({doc_id}) ───────────────────\n\n"
-            f"{doc.strip()}\n"
+    assert ids and len(ids[0]) == len(primary_docs), "ID count mismatch"
+    return [
+        StoredChunk(
+            id=str(ids[0][i]),
+            text=str(primary_docs[i] or ""),
+            metadata=_stringify_meta(metadatas[0][i]),
         )
-        assembled.append(snippet)
-    console.print("\n".join(assembled), markup=False)
-    return assembled
+        for i in range(len(primary_docs))
+    ]
 
 
 def load_elements(
@@ -260,11 +228,12 @@ def load_elements(
     md5: str,
     elements: Sequence[ElementLike],
     collection: str,
-    text: str,
-    document_metadata: Optional[DocumentMetadata] = None,
-    client: Optional[ClientAPI] = None,
+    document_metadata: Optional[DocumentMetadata],
+    *,
+    client: ClientAPI,
 ) -> None:
-    client = get_or_create_chroma(work_dir, client)
+    """Upsert chunked elements into Chroma."""
+
     coll = _collection(client, collection)
     existing = coll.get(where={"md5": md5})
     ids = existing["ids"]

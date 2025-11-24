@@ -1,41 +1,40 @@
 from __future__ import annotations
 
-import json
-import re
-import shutil
-import unicodedata
 from pathlib import Path
-from typing import Annotated, Dict, List, Optional, Sequence, Tuple, cast
-from urllib.parse import unquote, urlsplit
+from typing import List, Optional, Sequence, cast
 
-import backoff
-import certifi
 from loguru import logger
-from pydantic import TypeAdapter
-import mobi
-import requests
-import typer
-from rich import box
-from rich.console import Console
-from rich.pretty import pretty_repr
-from rich.table import Table
-from rich.text import Text
 from unstructured.documents.elements import Element, ElementMetadata, ListItem, Title
 from unstructured.file_utils.filetype import detect_filetype
 from unstructured.partition.auto import partition
 from unstructured.staging.base import element_to_md
 
-from annas.common import work_dir_callback
-from annas.scrape import ANNAS_BASE_URL, SearchResult, scrape_search_results
-from annas.store import (
-    DocumentMetadata,
-    ElementLike,
-    load_elements,
-    write_chunk_snapshot,
-    store_app,
-)
+from annas.store import ElementLike
 
-# ------ Reusable non-Anna's Archive specific utilities for processing ------ #
+
+def count_text_characters(elements: Sequence[ElementLike]) -> int:
+    """Count non-whitespace characters across text-bearing elements.
+
+    The helper strips whitespace from each element's ``text`` attribute and sums the
+    remaining character counts. It is useful for quickly estimating textual density in
+    partitioned documents before choosing downstream processing strategies.
+
+    Args:
+        elements: Iterable of objects with ``text`` attributes.
+
+    Returns:
+        Total number of non-whitespace characters across all elements.
+    """
+
+    total = 0
+    for element in elements:
+        text = getattr(element, "text", "")
+        if not text:
+            continue
+        stripped = str(text).strip()
+        if stripped:
+            total += len(stripped)
+    return total
 
 
 def compute_pdf_ocr_ratio(
@@ -43,10 +42,28 @@ def compute_pdf_ocr_ratio(
     metadata_filename: str,
     hi_res_elements: Sequence[ElementLike],
 ) -> Optional[float]:
+    """Estimate how much extracted PDF text depends on OCR.
+
+    Compares character counts between an existing high-resolution partition (typically
+    with OCR enabled) and a fresh ``strategy="fast"`` partition of the same file. The
+    returned value represents the fraction of characters present only in the OCR-heavy
+    output. Non-PDF inputs return ``None``.
+
+    Args:
+        path: File path to the document under test.
+        metadata_filename: Filename passed through to ``partition`` for metadata.
+        hi_res_elements: Elements produced by a high-resolution partition pass.
+
+    Returns:
+        ``None`` for non-PDFs, otherwise a float in ``[0.0, 1.0]`` where ``1.0`` means
+        all text required OCR and ``0.0`` means the fast pass already contained all
+        extracted text.
+    """
+
     if path.suffix.lower() != ".pdf":
         return None
 
-    hi_chars = _count_text_characters(hi_res_elements)
+    hi_chars = count_text_characters(hi_res_elements)
     if hi_chars <= 0:
         return 1.0
 
@@ -60,7 +77,7 @@ def compute_pdf_ocr_ratio(
         logger.warning("Unable to compute fast-text baseline: {}", exc)
         return 1.0
 
-    fast_chars = _count_text_characters(cast(Sequence[ElementLike], fast_elements))
+    fast_chars = count_text_characters(cast(Sequence[ElementLike], fast_elements))
     if fast_chars <= 0:
         return 1.0
     if fast_chars >= hi_chars:
@@ -69,6 +86,19 @@ def compute_pdf_ocr_ratio(
 
 
 def elements_to_markdown(elements: Sequence[ElementLike]) -> str:
+    """Render unstructured elements into lightweight Markdown.
+
+    The converter preserves heading levels, list items, and page breaks while leaning on
+    ``element_to_md`` for standard element rendering. Empty or whitespace-only elements
+    are skipped to avoid noise in downstream chunking.
+
+    Args:
+        elements: Sequence of elements produced by ``unstructured`` partitioning.
+
+    Returns:
+        Markdown string containing the rendered elements and page markers.
+    """
+
     lines: List[str] = []
     last_page: Optional[int] = None
 
@@ -119,16 +149,29 @@ def elements_to_markdown(elements: Sequence[ElementLike]) -> str:
     return "\n".join(lines)
 
 
-# ------ Internal helpers ------ #
+def detect_extension(path: Path) -> Optional[str]:
+    """Guess a file's extension using ``unstructured`` detection, with suffix fallback.
 
+    Attempts to infer an extension via ``detect_filetype`` (libmagic-backed). When that
+    fails, the function falls back to the path's suffix, returning ``None`` only when no
+    evidence is available. The returned value omits any leading dot and is lowercased.
 
-def _count_text_characters(elements: Sequence[ElementLike]) -> int:
-    total = 0
-    for element in elements:
-        text = getattr(element, "text", "")
-        if not text:
-            continue
-        stripped = str(text).strip()
-        if stripped:
-            total += len(stripped)
-    return total
+    Args:
+        path: File path to inspect.
+
+    Returns:
+        Lowercased extension string without the leading dot, or ``None`` if undetectable.
+    """
+
+    try:
+        file_type = detect_filetype(str(path))
+    except Exception:  # pylint: disable=broad-except
+        file_type = None
+
+    if file_type is not None:
+        primary_ext = next(iter(getattr(file_type, "_extensions", [])), None)
+        if primary_ext:
+            return primary_ext.lstrip(".").lower()
+
+    suffix = path.suffix.lower().lstrip(".")
+    return suffix or None
