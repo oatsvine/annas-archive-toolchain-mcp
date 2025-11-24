@@ -143,6 +143,7 @@ def test_scraped_metadata_matches_download(tmp_path: Path) -> None:
     assert candidate is not None
 
     work_dir = tmp_path / "annas"
+    # NOTE: Returns the download directory, not the particular converted file, locate by extension.
     download_path = download(candidate.md5, work_dir=work_dir, secret_key=secret)
     assert download_path.exists(), "Expected downloaded artifact to exist"
 

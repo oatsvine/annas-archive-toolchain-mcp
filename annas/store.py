@@ -14,7 +14,7 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from rich.console import Console
 from unstructured.chunking.basic import chunk_elements
-from unstructured.documents.elements import Element, ElementMetadata, ListItem, Title
+from unstructured.documents.elements import Element, ElementMetadata, Title
 
 from annas.common import work_dir_callback
 

@@ -12,7 +12,7 @@
 
 ## Quick start
 ```bash
-uv sync
+uv sync # or 'uv sync --all-extras' or choose extras manually (pdf, epub, etc)
 # Set env (or .env): ANNAS_SECRET_KEY, ANNAS_DOWNLOAD_PATH
 uv run python -m annas.cli search-catalog plato --limit 5
 uv run python -m annas.cli download <md5> --work-dir /tmp/annas --collection my-chroma

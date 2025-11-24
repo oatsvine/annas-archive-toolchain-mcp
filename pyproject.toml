@@ -25,33 +25,29 @@ dependencies = [
   "loguru",
   "backoff",
   "playwright",
-  "black",
-  "pyright",
   "unstructured[md]",
-  "epub-utils",
-  "mobi",
   "pypandoc",
   "html2text",
   "markdown",
-  "EbookLib",
   "prettytable",
   "httpx",
   "chromadb",
-  "fastmcp",
 ]
 
 [project.optional-dependencies]
-dev = [
-  "pytest",
-  "pytest-asyncio",
-]
-
 epub = [
   "unstructured[epub]",
+  "EbookLib",
+  "mobi",
+  "epub-utils",
 ]
 
 pdf = [
   "unstructured[pdf]",
+]
+
+mcp = [
+  "fastmcp",
 ]
 
 [tool.setuptools]
@@ -62,10 +58,11 @@ include = ["annas","tests"]
 exclude = ["**/node_modules", "**/__pycache__", "lib"]
 
 [tool.uv]
-override-dependencies = [
-  "langchain>=1.0.0a6",
-  "langgraph>=1.0.0a4",
-  "langchain-openai>=1.0.0a3",
+dev-dependencies = [
+  "pytest",
+  "pytest-asyncio",
+  "black",
+  "pyright",
 ]
 
 [tool.uv.pip]

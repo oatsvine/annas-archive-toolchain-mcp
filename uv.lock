@@ -56,21 +56,15 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "backoff" },
-    { name = "black" },
     { name = "chromadb" },
-    { name = "ebooklib" },
-    { name = "epub-utils" },
-    { name = "fastmcp" },
     { name = "html2text" },
     { name = "httpx" },
     { name = "loguru" },
     { name = "markdown" },
-    { name = "mobi" },
     { name = "playwright" },
     { name = "prettytable" },
     { name = "pydantic" },
     { name = "pypandoc" },
-    { name = "pyright" },
     { name = "rich" },
     { name = "typer-slim" },
     { name = "unstructured", extra = ["md"] },
@@ -78,11 +72,19 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "black" },
+    { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
 epub = [
+    { name = "ebooklib" },
+    { name = "epub-utils" },
+    { name = "mobi" },
     { name = "unstructured", extra = ["epub"] },
+]
+mcp = [
+    { name = "fastmcp" },
 ]
 pdf = [
     { name = "unstructured", extra = ["pdf"] },
@@ -91,21 +93,21 @@ pdf = [
 [package.metadata]
 requires-dist = [
     { name = "backoff" },
-    { name = "black" },
+    { name = "black", marker = "extra == 'dev'" },
     { name = "chromadb" },
-    { name = "ebooklib" },
-    { name = "epub-utils" },
-    { name = "fastmcp" },
+    { name = "ebooklib", marker = "extra == 'epub'" },
+    { name = "epub-utils", marker = "extra == 'epub'" },
+    { name = "fastmcp", marker = "extra == 'mcp'" },
     { name = "html2text" },
     { name = "httpx" },
     { name = "loguru" },
     { name = "markdown" },
-    { name = "mobi" },
+    { name = "mobi", marker = "extra == 'epub'" },
     { name = "playwright" },
     { name = "prettytable" },
     { name = "pydantic", specifier = ">=2.11.4" },
     { name = "pypandoc" },
-    { name = "pyright" },
+    { name = "pyright", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "rich" },
@@ -114,7 +116,7 @@ requires-dist = [
     { name = "unstructured", extras = ["md"] },
     { name = "unstructured", extras = ["pdf"], marker = "extra == 'pdf'" },
 ]
-provides-extras = ["dev", "epub", "pdf"]
+provides-extras = ["dev", "epub", "pdf", "mcp"]
 
 [[package]]
 name = "annotated-types"

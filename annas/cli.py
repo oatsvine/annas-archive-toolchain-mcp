@@ -8,6 +8,7 @@ fail-fast surface areas.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import unicodedata
@@ -18,6 +19,7 @@ from urllib.parse import unquote, urlsplit
 import backoff
 import certifi
 from loguru import logger
+from pydantic import TypeAdapter
 import mobi
 import requests
 import typer
@@ -99,11 +101,9 @@ def search_catalog(
     capped_limit = min(limit, 200)
     results = scrape_search_results(normalized, limit=capped_limit)
     if output_json:
-        payload = [entry.model_dump_json() for entry in results]
-        console.print(
-            "[\n" + ",\n".join(payload) + "\n]", markup=False, highlight=False
-        )
-        logger.debug("Emitted JSON for {} results", len(results))
+        for entry in results:
+            print(entry.model_dump_json())
+        logger.debug("Emitted JSONL for {} results", len(results))
         return results
     table = Table(
         title="Search Results",
@@ -175,7 +175,14 @@ def download(
             max=1.0,
         ),
     ] = None,
-) -> None:
+    output_json: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Emit raw JSON instead of a table (useful for scripting)",
+        ),
+    ] = False,
+) -> Path:
     """Download a file by md5, normalize artifacts, and optionally ingest chunks."""
 
     if ocr_limit is not None:
@@ -294,6 +301,17 @@ def download(
             document_metadata,
         )
     logger.info("Download complete", md5=md5_value)
+    if output_json:
+        payload = TypeAdapter(Dict[str, str]).dump_json(
+            {
+                "markdown": str(markdown_path),
+                "normalized": str(download_path),
+                "raw": str(raw_path),
+                "chunks": str(chunk_path),
+            }
+        )
+        print(payload.decode("utf-8"))
+        return work_dir / md5_value
     artifact_table = Table(
         title="Saved Artifacts",
         box=box.MINIMAL_HEAVY_HEAD,
@@ -307,6 +325,7 @@ def download(
     artifact_table.add_row("Raw download", str(raw_path))
     artifact_table.add_row("Chunks (jsonl)", str(chunk_path))
     console.print(artifact_table)
+    return work_dir / md5_value
 
 
 @app.command()
