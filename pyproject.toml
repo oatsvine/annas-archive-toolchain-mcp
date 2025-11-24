@@ -21,7 +21,7 @@ keywords = [
 dependencies = [
   "pydantic>=2.11.4",
   "rich",
-  "typer",
+  "typer-slim>=0.20.0",
   "loguru",
   "backoff",
   "playwright",
@@ -34,7 +34,6 @@ dependencies = [
   "html2text",
   "markdown",
   "EbookLib",
-  # "ftfy",
   "prettytable",
   "httpx",
   "chromadb",
@@ -42,24 +41,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-db = [
-  "sqlmodel>=0.0.24",
-  "pgvector>=0.4.1",
-]
-
-langchain = [
-  "langchain",
-  "langchain-text-splitters",
-]
-
 dev = [
   "pytest",
   "pytest-asyncio",
-  "langchain-mcp-adapters",
 ]
 
-legacy = [
-  "fire",
+epub = [
+  "unstructured[epub]",
+]
+
+pdf = [
+  "unstructured[pdf]",
 ]
 
 [tool.setuptools]
