@@ -2,6 +2,8 @@
 
 **Human-friendly, robust, and RAG-ready CLI for Anna's Archive** — search the live catalog, download reliable artifacts, normalize them to Markdown, and ingest chunks into Chroma so retrieval-augmented generation just works. Built as a Typer CLI with Playwright-powered search, fast MD5 downloads, Markdown normalization, and semantic search over EPUB/PDF/MOBI content.
 
+![Basic usage demo](./basic-usage-peek.gif)
+
 ## Why this toolchain
 - **Accurate catalog search**: Rich-rendered results with verified metadata (format, size, language, year) for fast triage.
 - **Reliable downloads**: Fast-download routing with retries, extension validation, MOBI→HTML conversion, and Markdown generation via `unstructured`.
