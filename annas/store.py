@@ -12,12 +12,14 @@ from chromadb.api.models.Collection import Collection
 from chromadb.api.types import GetResult, Metadata, QueryResult, Where
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from rich.console import Console
 from unstructured.chunking.basic import chunk_elements
 from unstructured.documents.elements import Element, ElementMetadata, ListItem, Title
 
 from annas.common import work_dir_callback
 
 store_app = typer.Typer(name="store", help="Chroma-backed metadata and query helpers.")
+console = Console()
 
 
 class ElementLike(Protocol):
@@ -84,6 +86,13 @@ class DocumentMetadata(BaseModel):
         return value
 
 
+class ChunkRecord(BaseModel):
+    """Persisted chunk snapshot for debuggable ingestion."""
+
+    text: str
+    metadata: Dict[str, str]
+
+
 def get_or_create_chroma(
     work_dir: Path, client: Optional[ClientAPI] = None
 ) -> ClientAPI:
@@ -120,9 +129,7 @@ def _metadata(
         n,
         collection_name,
     )
-    return collection.get(
-        where=md5_filter, limit=n, include=["documents", "metadatas"]
-    )
+    return collection.get(where=md5_filter, limit=n, include=["documents", "metadatas"])
 
 
 @store_app.command()
@@ -165,10 +172,10 @@ def metadata(
     metadatas = query_result["metadatas"] or []
     assert len(docs) == len(metadatas), "Metadata count mismatch"
     if not docs:
-        typer.echo("")
+        console.print("", markup=False)
         return []
     assembled = [json.dumps(meta or {}) for meta in metadatas]
-    typer.echo("\n".join(assembled))
+    console.print("\n".join(assembled), markup=False)
     return assembled
 
 
@@ -244,7 +251,7 @@ def query_collection(
             f"{doc.strip()}\n"
         )
         assembled.append(snippet)
-    typer.echo("\n".join(assembled))
+    console.print("\n".join(assembled), markup=False)
     return assembled
 
 
@@ -268,6 +275,35 @@ def load_elements(
     if not typed_elements:
         return
 
+    chunk_ids, documents, metadatas, records = _build_chunk_payloads(
+        md5, typed_elements, document_metadata
+    )
+    coll.upsert(
+        ids=chunk_ids, documents=documents, metadatas=cast(List[Metadata], metadatas)
+    )
+    _write_chunk_file(work_dir, md5, records)
+
+
+def write_chunk_snapshot(
+    work_dir: Path,
+    md5: str,
+    elements: Sequence[ElementLike],
+    document_metadata: Optional[DocumentMetadata],
+) -> Path:
+    """Persist chunk JSONL without touching Chroma (for offline inspection)."""
+
+    typed_elements = [cast(Element, element) for element in elements]
+    if not typed_elements:
+        return work_dir / md5 / "chunks" / "chunks.jsonl"
+    _, _, _, records = _build_chunk_payloads(md5, typed_elements, document_metadata)
+    return _write_chunk_file(work_dir, md5, records)
+
+
+def _build_chunk_payloads(
+    md5: str,
+    typed_elements: Sequence[Element],
+    document_metadata: Optional[DocumentMetadata],
+) -> tuple[List[str], List[str], List[Dict[str, str]], List[ChunkRecord]]:
     document_page_numbers: set[int] = set()
     raw_title = document_metadata.title if document_metadata else None
     doc_title = raw_title.strip() if isinstance(raw_title, str) else ""
@@ -367,9 +403,22 @@ def load_elements(
 
     assert documents, "All ingestable chunks were empty after processing"
     chunk_ids = [f"{md5}:{index:04d}" for index in range(1, len(documents) + 1)]
-    coll.upsert(
-        ids=chunk_ids, documents=documents, metadatas=cast(List[Metadata], metadatas)
-    )
+    records = [
+        ChunkRecord(text=doc, metadata=meta) for doc, meta in zip(documents, metadatas)
+    ]
+    return chunk_ids, documents, metadatas, records
+
+
+def _write_chunk_file(work_dir: Path, md5: str, records: Sequence[ChunkRecord]) -> Path:
+    chunk_dir = work_dir / md5 / "chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    chunk_path = chunk_dir / "chunks.jsonl"
+    with chunk_path.open("w", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(record.model_dump_json())
+            fh.write("\n")
+    logger.debug("Wrote {} chunks to {}", len(records), chunk_path)
+    return chunk_path
 
 
 def _validate_md5(md5: str) -> str:

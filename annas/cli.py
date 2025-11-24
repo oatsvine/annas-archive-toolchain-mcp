@@ -12,19 +12,19 @@ import re
 import shutil
 import unicodedata
 from pathlib import Path
-from typing import Annotated, Dict, List, Optional, Sequence, cast
+from typing import Annotated, Dict, List, Optional, Sequence, Tuple, cast
 from urllib.parse import unquote, urlsplit
 
 import backoff
 import certifi
+from loguru import logger
 import mobi
 import requests
 import typer
-from loguru import logger
-from rich.pretty import pretty_repr
-from rich.console import Console
-from rich.table import Table
 from rich import box
+from rich.console import Console
+from rich.pretty import pretty_repr
+from rich.table import Table
 from rich.text import Text
 from unstructured.documents.elements import Element, ElementMetadata, ListItem, Title
 from unstructured.file_utils.filetype import detect_filetype
@@ -37,12 +37,15 @@ from annas.store import (
     DocumentMetadata,
     ElementLike,
     load_elements,
+    write_chunk_snapshot,
     store_app,
 )
 
 FAST_DOWNLOAD_ENDPOINT = f"{ANNAS_BASE_URL}/dyn/api/fast_download.json"
 MD5_PATTERN = re.compile(r"[0-9a-f]{32}", re.IGNORECASE)
 ANNA_BRAND_PATTERN = re.compile(r"anna[’']?s archive", re.IGNORECASE)
+
+console = Console()
 
 
 class ArtifactValidationError(RuntimeError):
@@ -78,6 +81,13 @@ def search_catalog(
             help="Maximum number of results to return (capped at 200)",
         ),
     ] = 20,
+    output_json: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Emit raw JSON instead of a table (useful for scripting)",
+        ),
+    ] = False,
 ) -> List[SearchResult]:
     """Search the live Anna's Archive catalog and return structured results."""
 
@@ -88,7 +98,13 @@ def search_catalog(
 
     capped_limit = min(limit, 200)
     results = scrape_search_results(normalized, limit=capped_limit)
-    console = Console()
+    if output_json:
+        payload = [entry.model_dump_json() for entry in results]
+        console.print(
+            "[\n" + ",\n".join(payload) + "\n]", markup=False, highlight=False
+        )
+        logger.debug("Emitted JSON for {} results", len(results))
+        return results
     table = Table(
         title="Search Results",
         box=box.SIMPLE_HEAVY,
@@ -96,12 +112,12 @@ def search_catalog(
         header_style="bold cyan",
         row_styles=["none", "dim"],
     )
-    table.add_column("Title", overflow="fold", ratio=4)
-    table.add_column("Format / Size", ratio=1)
+    table.add_column("Title", overflow="fold", max_width=40, ratio=3)
+    table.add_column("Format / Size", ratio=1, max_width=16)
     table.add_column("Lang", width=6, justify="center")
     table.add_column("Year", width=6, justify="center")
-    table.add_column("Category", ratio=2)
-    table.add_column("MD5", width=12)
+    table.add_column("Category", overflow="fold", max_width=24, ratio=2)
+    table.add_column("MD5", width=34, overflow="ellipsis")
 
     for entry in results:
         size_label = entry.file_size_label or (
@@ -117,8 +133,7 @@ def search_catalog(
         title_text = Text(entry.title or "Untitled", overflow="fold")
         if entry.url:
             title_text.stylize(f"link {entry.url}")
-        md5_short = f"{entry.md5[:8]}…"
-        table.add_row(title_text, format_size, lang, year, category, md5_short)
+        table.add_row(title_text, format_size, lang, year, category, entry.md5)
 
     console.print(table)
     logger.debug("Rendered {} results", len(results))
@@ -160,7 +175,7 @@ def download(
             max=1.0,
         ),
     ] = None,
-) -> Path:
+) -> None:
     """Download a file by md5, normalize artifacts, and optionally ingest chunks."""
 
     if ocr_limit is not None:
@@ -174,6 +189,7 @@ def download(
     logger.debug("Preparing download target dir {}", work_dir / md5_value)
     last_error: Optional[Exception] = None
     download_path: Optional[Path] = None
+    raw_path: Optional[Path] = None
     path_candidates: List[Optional[int]] = [None, 1, 2]
     domain_candidates: List[Optional[int]] = [None, 1, 2, 3]
     for path_index in path_candidates:
@@ -184,7 +200,12 @@ def download(
             if domain_index is not None:
                 params["domain_index"] = str(domain_index)
             try:
-                logger.debug("Requesting fast-download URL path={} domain={} params={} ", path_index, domain_index, params)
+                logger.debug(
+                    "Requesting fast-download URL path={} domain={} params={} ",
+                    path_index,
+                    domain_index,
+                    params,
+                )
                 response = _retrying_get(session, FAST_DOWNLOAD_ENDPOINT, params=params)
             except requests.HTTPError as exc:
                 logger.warning(
@@ -212,9 +233,10 @@ def download(
                 )
                 artifact_dir = work_dir / md5_value
                 artifact_dir.mkdir(parents=True, exist_ok=True)
-                download_path = _write_stream(
+                download_path, raw_path = _write_stream(
                     md5_value, download_response, artifact_dir
                 )
+                logger.debug("Raw artifact stored at {}", raw_path)
                 break
             except ArtifactValidationError as exc:
                 logger.warning(
@@ -229,6 +251,7 @@ def download(
             break
 
     assert download_path is not None, f"Failed to download valid artifact: {last_error}"
+    assert raw_path is not None, f"Failed to retain raw artifact: {last_error}"
     detected_extension = _detect_extension(download_path)
     assert detected_extension is not None, "Unable to detect downloaded file format"
     document_metadata = _document_metadata_from_path(download_path)
@@ -258,8 +281,9 @@ def download(
             filename=document_metadata.filename,
         )
     markdown = _elements_to_markdown(elements)
-    markdown_path = _first_markdown_path(work_dir, md5_value)
+    markdown_path = _first_markdown_path(work_dir, md5_value, download_path.stem)
     markdown_path.write_text(markdown, encoding="utf-8")
+    chunk_path = write_chunk_snapshot(work_dir, md5_value, elements, document_metadata)
     if collection:
         load_elements(
             work_dir,
@@ -269,9 +293,20 @@ def download(
             markdown,
             document_metadata,
         )
-    logger.info("Download complete", md5=md5_value, path=str(download_path))
-    typer.echo(str(download_path))
-    return download_path
+    logger.info("Download complete", md5=md5_value)
+    artifact_table = Table(
+        title="Saved Artifacts",
+        box=box.MINIMAL_HEAVY_HEAD,
+        show_header=True,
+        header_style="bold green",
+    )
+    artifact_table.add_column("Artifact", style="bold")
+    artifact_table.add_column("Path", overflow="fold")
+    artifact_table.add_row("Markdown", str(markdown_path))
+    artifact_table.add_row("Normalized", str(download_path))
+    artifact_table.add_row("Raw download", str(raw_path))
+    artifact_table.add_row("Chunks (jsonl)", str(chunk_path))
+    console.print(artifact_table)
 
 
 @app.command()
@@ -316,13 +351,13 @@ def search_downloaded_text(
     markdown_path = _first_markdown_path(work_dir, md5_value)
 
     if not markdown_path.exists():
-        typer.echo("")
+        console.print("", markup=False)
         return ""
     content = markdown_path.read_text(encoding="utf-8")
 
     lines = content.splitlines()
     if not lines:
-        typer.echo("")
+        console.print("", markup=False)
         return ""
 
     lower_needle = normalized.lower()
@@ -339,7 +374,7 @@ def search_downloaded_text(
             break
 
     rendered = "\n\n".join(snippets)
-    typer.echo(rendered)
+    console.print(rendered, markup=False)
     return rendered
 
 
@@ -463,45 +498,59 @@ def _validate_md5(md5: str) -> str:
     return candidate
 
 
-def _artifact_dir(work_dir: Path, md5: str) -> Path:
-    path = Path(work_dir) / md5
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+def _write_stream(
+    md5: str, response: requests.Response, target_dir: Path
+) -> Tuple[Path, Path]:
+    raw_dir = target_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
 
-
-def _write_stream(md5: str, response: requests.Response, target_dir: Path) -> Path:
     filename = _filename_from_response(md5, response)
-    target_file = target_dir / filename
-    logger.debug("Writing stream to {} (chunked)", target_file)
-    logger.info("Writing download to {path}", path=str(target_file))
-    with target_file.open("wb") as fh:
+    raw_file = raw_dir / filename
+    logger.debug("Writing stream to {} (chunked)", raw_file)
+    logger.info("Writing download to {path}", path=str(raw_file))
+    with raw_file.open("wb") as fh:
         for chunk in response.iter_content(chunk_size=1_048_576):
             if chunk:
                 fh.write(chunk)
-    if target_file.suffix.lower() in [".mobi", ".azw", ".azw3"]:
+
+    normalized_dir = target_dir / "normalized"
+    normalized_dir.mkdir(parents=True, exist_ok=True)
+    final_path = raw_file
+
+    if raw_file.suffix.lower() in [".mobi", ".azw", ".azw3"]:
         try:
-            tempdir, name = mobi.extract(str(target_file))
+            tempdir, name = mobi.extract(str(raw_file))
             tmp_file = Path(tempdir) / name
-            logger.info(f"Extracted {target_file.name} => {tmp_file.name}")
+            logger.info(f"Extracted {raw_file.name} => {tmp_file.name}")
             assert tmp_file.exists(), f"Extracted file missing: {tmp_file}"
             extracted_suffix = tmp_file.suffix or ".html"
-            converted_path = target_file.with_suffix(extracted_suffix)
+            converted_name = raw_file.with_suffix(extracted_suffix).name
+            converted_path = normalized_dir / converted_name
             if converted_path.exists():
                 converted_path.unlink()
             shutil.move(str(tmp_file), str(converted_path))
             for item in Path(tempdir).iterdir():
                 if item == tmp_file or not item.exists():
                     continue
-                destination = converted_path.parent / item.name
+                destination = normalized_dir / item.name
                 if destination.exists():
-                    continue
+                    if destination.is_dir():
+                        shutil.rmtree(destination)
+                    else:
+                        destination.unlink()
                 shutil.move(str(item), str(destination))
-            target_file.unlink(missing_ok=True)
-            target_file = converted_path
+            final_path = converted_path
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("MOBI conversion failed: {}", exc)
-    detected_extension = _detect_extension(target_file)
-    expected_extension = target_file.suffix.lstrip(".").lower()
+            final_path = raw_file
+    else:
+        candidate = normalized_dir / raw_file.name
+        if not candidate.exists():
+            shutil.copy2(raw_file, candidate)
+        final_path = candidate
+
+    detected_extension = _detect_extension(final_path)
+    expected_extension = final_path.suffix.lstrip(".").lower()
     assert (
         expected_extension
     ), "Downloaded file is missing an extension in the Content-Disposition header"
@@ -511,8 +560,8 @@ def _write_stream(md5: str, response: requests.Response, target_dir: Path) -> Pa
             expected_extension,
             detected_extension,
         )
-    _assert_readable_container(target_file, expected_extension)
-    return target_file
+    _assert_readable_container(final_path, expected_extension)
+    return final_path, raw_file
 
 
 def _filename_from_response(md5: str, response: requests.Response) -> str:
@@ -558,6 +607,11 @@ def _sanitize_filename(filename: str, md5: str) -> str:
     ]
     slug_components.extend(_slug(segment) for segment in extra_segments)
     slug_components.extend(isbn_tokens)
+
+    if slug_components:
+        slug_components[0] = _trim_tokens(slug_components[0], 4)
+    if len(slug_components) > 1:
+        slug_components[1] = _trim_tokens(slug_components[1], 8)
 
     filtered = [component for component in slug_components if component]
     slug_body = "__".join(filtered) if filtered else "document"
@@ -641,7 +695,13 @@ def _slug(value: str) -> str:
     lowered = lowered.replace("'", "_")
     slug = re.sub(r"[^0-9a-z]+", "_", lowered)
     slug = re.sub(r"_+", "_", slug).strip("_")
-    return slug
+    max_segment_length = 48
+    return slug[:max_segment_length]
+
+
+def _trim_tokens(slug: str, max_tokens: int) -> str:
+    parts = [segment for segment in slug.split("_") if segment]
+    return "_".join(parts[:max_tokens]) if parts else slug
 
 
 def _extract_isbns(value: str) -> List[str]:
@@ -709,13 +769,20 @@ def _document_metadata_from_path(path: Path) -> DocumentMetadata:
     )
 
 
-def _first_markdown_path(work_dir: Path, md5: str) -> Path:
+def _first_markdown_path(work_dir: Path, md5: str, stem: Optional[str] = None) -> Path:
     target_dir = work_dir / md5
-    target_dir.mkdir(parents=True, exist_ok=True)
-    candidates = sorted(target_dir.glob("*.md"))
-    if not candidates:
-        return target_dir / "converted.md"
-    return candidates[0]
+    markdown_dir = target_dir / "markdown"
+    markdown_dir.mkdir(parents=True, exist_ok=True)
+
+    candidates = sorted(markdown_dir.glob("*.md"))
+    if candidates:
+        return candidates[0]
+    if stem:
+        return markdown_dir / f"{stem}.md"
+    fallback_candidates = sorted(target_dir.glob("*.md"))
+    if fallback_candidates:
+        return fallback_candidates[0]
+    return markdown_dir / "converted.md"
 
 
 if __name__ == "__main__":
