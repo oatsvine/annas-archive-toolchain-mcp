@@ -24,7 +24,7 @@ jobs:
           cache-dependency-glob: "pyproject.toml"
 
       - name: Install dependencies
-        run: uv sync --group dev --extra mcp
+        run: uv sync --group dev
 
       - name: Install Playwright browsers
         # Playwright guidance: install browsers fresh in CI, don't cache binaries.
