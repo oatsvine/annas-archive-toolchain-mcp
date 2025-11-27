@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [master]
-  pull_request:
-    branches: [master]
+  # Manual trigger for trusted maintainers (avoids exposing secrets to untrusted PRs)
+  workflow_dispatch:
 
 jobs:
   tests:

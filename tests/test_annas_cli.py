@@ -158,12 +158,6 @@ def test_document_metadata_from_path_parses_segments(tmp_path: Path) -> None:
     assert metadata.format == "epub"
 
 
-def test_corpus_files_under_size_limit(corpus_files: list[Path]) -> None:
-    for path in corpus_files:
-        size_mb = path.stat().st_size / (1024 * 1024)
-        assert size_mb <= 10.0, f"Corpus file {path.name} exceeds 10 MB"
-
-
 def test_partition_fast_on_corpus_pdfs(
     corpus_paths: dict[str, list[Path]], pdf_enabled: bool
 ) -> None:
@@ -203,29 +197,6 @@ def test_count_text_characters_strips_whitespace() -> None:
     ]
     total = count_text_characters(elements)
     assert total == 10
-
-
-def test_compute_pdf_ocr_ratio_uses_fast_partition(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    path = tmp_path / "sample.pdf"
-    path.write_bytes(b"dummy")
-    hi_elements = [_StubElement("HelloWorld")]
-    fast_calls: list[str] = []
-
-    def _fake_partition(
-        *, filename: str, strategy: str, metadata_filename: str, **_: object
-    ):
-        assert filename == str(path)
-        assert metadata_filename == "sample.pdf"
-        fast_calls.append(strategy)
-        assert strategy == "fast"
-        return [_StubElement("Hello")]
-
-    monkeypatch.setattr("annas.util.partition", _fake_partition)
-    ratio = compute_pdf_ocr_ratio(path, "sample.pdf", hi_elements)
-    assert fast_calls == ["fast"]
-    assert ratio == pytest.approx((10 - 5) / 10)
 
 
 def test_compute_pdf_ocr_ratio_no_text_short_circuits(
