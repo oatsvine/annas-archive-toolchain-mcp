@@ -26,5 +26,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
+      - name: Install Playwright browsers
+        # Playwright guidance: install browsers fresh in CI, don't cache binaries.
+        run: uv run playwright install --with-deps chromium
+
       - name: Run tests
         run: uv run pytest -q
