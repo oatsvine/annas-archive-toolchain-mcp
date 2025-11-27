@@ -26,7 +26,7 @@ uv run python -m annas.cli store query-collection my-chroma "Republic" --work-di
 - [x] Markdown normalization with page markers, titles, and list handling.
 - [x] Chroma ingestion + metadata inspection + text querying (`store` subcommands).
 - [x] Strict typing (Pyright) and Black formatting.
-- [ ] MCP server surface (planned).
+- [x] MCP server surface.
 
 ## Commands at a glance
 | Command | What it does |
@@ -45,7 +45,7 @@ uv run python -m annas.cli store query-collection my-chroma "Republic" --work-di
 5. **Retrieve**: `search-downloaded-text` for exact snippets; `store.query-collection` for semantic hits.
 
 ## Roadmap
-- [ ] MCP server parity with CLI surface.
+- [x] MCP server parity with CLI surface.
 - [ ] Pre-warmed NLTK data cache to avoid first-run downloads.
 - [ ] Additional format heuristics for edge-case archives.
 
