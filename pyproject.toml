@@ -28,23 +28,16 @@ dependencies = [
   "rich",
   "typer-slim>=0.20.0",
   "playwright",
-  "unstructured[md]",
+  "unstructured[md,epub,docx]",
+  "EbookLib",
+  "epub-utils",
+  "fastmcp==2.13.1",
 ]
 
 [project.optional-dependencies]
 
-epub = [
-  "unstructured[epub,docx]",
-  "EbookLib",
-  "epub-utils",
-]
-
 pdf = [
   "unstructured[pdf]",
-]
-
-mcp = [
-  "fastmcp",
 ]
 
 [dependency-groups]
@@ -74,3 +67,4 @@ testpaths = [
 pythonpath = [
     ".",
 ]
+asyncio_mode = "auto"

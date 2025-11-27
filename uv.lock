@@ -50,6 +50,9 @@ source = { virtual = "." }
 dependencies = [
     { name = "backoff" },
     { name = "chromadb" },
+    { name = "ebooklib" },
+    { name = "epub-utils" },
+    { name = "fastmcp" },
     { name = "loguru" },
     { name = "mobi" },
     { name = "playwright" },
@@ -57,18 +60,10 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "typer-slim" },
-    { name = "unstructured", extra = ["md"] },
+    { name = "unstructured", extra = ["docx", "epub", "md"] },
 ]
 
 [package.optional-dependencies]
-epub = [
-    { name = "ebooklib" },
-    { name = "epub-utils" },
-    { name = "unstructured", extra = ["docx", "epub"] },
-]
-mcp = [
-    { name = "fastmcp" },
-]
 pdf = [
     { name = "unstructured", extra = ["pdf"] },
 ]
@@ -85,9 +80,9 @@ dev = [
 requires-dist = [
     { name = "backoff" },
     { name = "chromadb" },
-    { name = "ebooklib", marker = "extra == 'epub'" },
-    { name = "epub-utils", marker = "extra == 'epub'" },
-    { name = "fastmcp", marker = "extra == 'mcp'" },
+    { name = "ebooklib" },
+    { name = "epub-utils" },
+    { name = "fastmcp", specifier = "==2.13.1" },
     { name = "loguru" },
     { name = "mobi" },
     { name = "playwright" },
@@ -95,11 +90,11 @@ requires-dist = [
     { name = "requests" },
     { name = "rich" },
     { name = "typer-slim", specifier = ">=0.20.0" },
-    { name = "unstructured", extras = ["epub", "docx"], marker = "extra == 'epub'" },
-    { name = "unstructured", extras = ["md"] },
+    { name = "unstructured" },
+    { name = "unstructured", extras = ["md", "epub", "docx"] },
     { name = "unstructured", extras = ["pdf"], marker = "extra == 'pdf'" },
 ]
-provides-extras = ["epub", "pdf", "mcp"]
+provides-extras = ["pdf"]
 
 [package.metadata.requires-dev]
 dev = [
