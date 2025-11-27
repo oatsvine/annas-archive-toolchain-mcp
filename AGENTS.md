@@ -13,7 +13,7 @@
 - Store APIs require explicit `ClientAPI` injection; only the CLI should call `get_or_create_chroma`.
 - Tests must target library modules (`core`, `store`, `util`); do not import `annas.cli`.
 - Create base `work_dir` in the CLI callback or fixtures; downstream helpers assume it already exists.
-- Format extras: keep EPUB/DOCX and PDF dependencies as optional extras (install with `uv sync --extra epub`, `--extra pdf`, or `--all-extras`). Never use conditional imports—if a format is needed, install its extra.
+- Format extras: keep EPUB/DOCX and PDF dependencies as optional extras (install with `uv sync`, `--extra pdf`, or `--all-extras`). Never use conditional imports—if a format is needed, install its extra.
 
 ### UV + pytest conventions
 - Keep pytest configuration in `pyproject.toml` under `[tool.pytest.ini_options]`; use `pythonpath = ["."]` instead of sys.path hacks.
